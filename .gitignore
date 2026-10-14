@@ -1,0 +1,29 @@
+# runtime / debug artifacts
+*.log
+*.bak
+*.bak-*
+*.before-*
+*.before-live-mirror.mjs
+
+# probe & demo scripts (not part of the shipped bridge)
+dbg-*.mjs
+probe-*.mjs
+diag-*.mjs
+demo-*.mjs
+preflight*.mjs
+smoke-test.mjs
+scan-binary.mjs
+detached-*.mjs
+detached-proof.txt
+extract-script.mjs
+.dash-extract.js
+
+# internal agent handoff (contains local absolute paths)
+HANDOFF.md
+
+# misc
+demo_plot.png
+.*.log
+
+# node
+node_modules/
