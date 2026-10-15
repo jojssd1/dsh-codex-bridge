@@ -1,0 +1,861 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DSH Subagents</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237aa2f7'/%3E%3Cpath d='M9 10 L15 16 L9 22' stroke='%230e1014' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 22 L23 22' stroke='%230e1014' stroke-width='2.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0e1014; --panel:#151922; --panel2:#1b2029; --line:#262c38;
+    --fg:#e2e8f0; --dim:#8792a2; --accent:#7aa2f7;
+    --run:#e0af68; --ok:#9ece6a; --bad:#f7768e;
+    --user:#1a2740; --asst:#171c26; --think:#141922;
+    /* three families, three jobs: serif to read, sans to navigate, mono for code */
+    /* Cambria Math sits before the CJK faces so Greek/math glyphs (rho, partial,
+       nabla, plus-minus) resolve to a matching serif instead of an arbitrary
+       symbol font -- one paragraph keeps one voice. */
+    --serif: Georgia, "Sitka Text", Cambria, "Noto Serif", "Cambria Math", "Songti SC", SimSun, serif;
+    --sans: -apple-system, "Segoe UI", Roboto, "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+    --fs-read:15.5px; --lh-read:1.85; --measure:74ch;
+    --surface:#131820; --surface2:#161c26; --surface-hover:#1a2029;
+    --code-bg:#0a0c10; --code-fg:#a8d0ff;
+    --thk-fg:#8d97a5; --thk-line:#2c3441;
+    --tgt-fg:#9aa5b4; --mh-fg:#b9c4d2; --mi-line:#1e242e;
+    --head-g1:#171c26; --head-g2:#141922;
+    --side-g1:#161b24; --side-g2:#12161e;
+    --comp-g1:#151922; --comp-g2:#171c26;
+    --th-bg:#1b2230; --th-fg:#cfd9e6; --tr-alt:#141a23;
+    --sel:#2f4a7a; --scroll:#2b3341; --scroll-h:#3a4557; --toast-bg:#1d2430;
+    --strong-fg:#ffffff; --h4-fg:#c8d2df; --quote-fg:#b6c0cd; --accent-fg:#0a1020;
+    --user-border:#2a3d5c; --final-bg:#122a1d; --final-border:#2a5c3e;
+    --err-bg:#2b1418; --err-border:#7a2d38; --err-fg:#ffb3bd;
+    --danger-soft:#2a1a1e; --danger-bg:#3a1a20; --danger-border:#7a2d38;
+    --r-sm:6px; --r-md:9px; --r-lg:12px; --r-xl:16px;
+    --sh-1:0 1px 2px rgba(0,0,0,.35);
+    --sh-2:0 4px 14px rgba(0,0,0,.35);
+    --sh-3:0 10px 34px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:var(--scroll-h);background-clip:content-box}
+  ::-webkit-scrollbar-corner{background:transparent}
+  *{scrollbar-width:thin;scrollbar-color:var(--scroll) transparent}
+  ::selection{background:var(--sel)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  body{margin:0;height:100vh;display:flex;font:13px/1.6 var(--sans);
+       background:var(--bg);color:var(--fg);overflow:hidden;
+       -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+       /* Georgia/Cambria default to OLD-STYLE figures, which makes technical numbers
+          (3298.4 vs 3294.5) hard to scan. They ship lnum + tnum, so ask for lining
+          digits of equal width instead of giving up the serif. */
+       font-variant-numeric: lining-nums tabular-nums;
+       font-feature-settings: "lnum" 1, "tnum" 1;}
+  /* sidebar: one entry per subagent (a conversation with context) */
+  #side{width:296px;flex:0 0 296px;border-right:1px solid var(--line);
+        background:linear-gradient(180deg,var(--side-g1),var(--side-g2));display:flex;flex-direction:column;min-height:0}
+  #side .hd{padding:12px 12px 8px;display:flex;align-items:center;gap:8px}
+  #side .hd b{font-size:12px;color:var(--accent);letter-spacing:1px;flex:1}
+  #newbtn{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:7px;
+          padding:5px 10px;font:inherit;font-size:12px;cursor:pointer}
+  #newbtn:hover{border-color:var(--accent);color:var(--accent)}
+  #list{overflow:auto;flex:1;min-height:0;padding:0 8px 12px}
+  .item{position:relative;padding:10px 12px;border-radius:var(--r-md);cursor:pointer;margin-bottom:4px;
+        border:1px solid transparent;transition:background .14s,border-color .14s}
+  .item::before{content:"";position:absolute;left:0;top:11px;bottom:11px;width:2px;border-radius:2px;
+                background:transparent;transition:background .14s}
+  .item.sel::before{background:var(--accent)}
+  .item.sel{box-shadow:inset 0 0 0 1px rgba(122,162,247,.08)}
+  .item:hover{background:var(--panel2)}
+  .item.sel{background:var(--panel2);border-color:var(--line)}
+  .item .top{display:flex;gap:7px;align-items:center}
+  .item .ttl{font-size:12.5px;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .x{color:var(--dim);cursor:pointer;padding:0 4px;font-size:15px;line-height:1;border-radius:4px}
+  .x:hover{color:var(--bad);background:var(--danger-soft)}
+  #clearbtn{background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:7px;
+            padding:5px 9px;font:inherit;font-size:12px;cursor:pointer}
+  #clearbtn:hover{border-color:var(--bad);color:var(--bad)}
+  .item .sub{color:var(--dim);font-size:11px;margin-top:3px}
+  .dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px}
+  .dot.running{background:var(--run);animation:pulse 1.1s ease-in-out infinite}
+  .dot.done{background:var(--ok)} .dot.failed,.dot.cancelled,.dot.interrupted{background:var(--bad)}
+  .dot.interrupted{animation:none;opacity:.85}
+  @keyframes pulse{50%{opacity:.2;transform:scale(.8)}}
+  /* main */
+  #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+  #head{padding:12px 18px;border-bottom:1px solid var(--line);
+        background:linear-gradient(180deg,var(--head-g1),var(--head-g2));display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+        box-shadow:var(--sh-1);z-index:2}
+  #head .t{font-weight:600;display:flex;align-items:center;gap:8px}
+  #head .m{color:var(--dim);font-size:11.5px;display:flex;gap:14px;flex-wrap:wrap}
+  #head code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:11px;color:var(--dim)}
+  .live{display:inline-flex;align-items:center;gap:6px;color:var(--run);font-size:11.5px}
+  .live .b{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1s infinite}
+  #thread{flex:1;overflow:auto;min-height:0;padding:18px 18px 26px}
+  .empty{color:var(--dim);text-align:center;margin-top:72px;line-height:2;font-size:12.5px}
+  .empty b{display:block;color:#aab4c2;font-size:13.5px;font-weight:600;margin-bottom:6px}
+  .empty kbd{background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;
+             border-radius:5px;padding:1px 6px;font-family:var(--mono);font-size:11px;color:#c3ccd8}
+  .turn{margin:0 0 12px;animation:in .18s ease-out}
+  @keyframes in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .who{font-family:var(--sans);font-size:10.5px;color:var(--dim);letter-spacing:.7px;margin-bottom:6px;text-transform:uppercase}
+  .bubble{border:1px solid var(--line);border-radius:12px;padding:13px 17px;max-width:min(860px,94%)}
+  .bubble .bd{font-family:var(--serif);font-size:var(--fs-read);line-height:var(--lh-read);
+              letter-spacing:.006em;max-width:var(--measure);
+              font-variant-numeric: lining-nums tabular-nums;
+              font-feature-settings: "lnum" 1, "tnum" 1}
+  .ub{background:var(--user);border-color:var(--user-border);margin-left:auto}
+  .asst{background:var(--asst)}
+  .final{background:var(--final-bg);border-color:var(--final-border)}
+  .errb{background:var(--err-bg);border-color:var(--err-border);color:var(--err-fg);font-weight:600}
+  .bubble p{margin:0 0 13px}.bubble p:last-child{margin-bottom:0}
+  .bubble h3{font-size:1.12em;margin:16px 0 8px;font-weight:600;letter-spacing:.01em}
+  .bubble h4{font-size:1.02em;margin:13px 0 6px;font-weight:600;color:var(--h4-fg)}
+  .bubble h3:first-child,.bubble h4:first-child{margin-top:0}
+  .bubble ul,.bubble ol{margin:0 0 12px;padding-left:22px}
+  .bubble li{margin:3px 0}
+  .bubble strong,.bubble b{font-weight:600;color:var(--strong-fg)}
+  .bubble blockquote{margin:10px 0;padding:2px 0 2px 13px;border-left:3px solid var(--line);color:var(--quote-fg)}
+  .bubble hr{border:0;border-top:1px solid var(--line);margin:16px 0}
+  .bubble table{border-collapse:collapse;margin:12px 0;font-family:var(--sans);font-size:12.5px;
+                display:block;overflow-x:auto;max-width:100%;
+                font-variant-numeric: lining-nums tabular-nums;font-feature-settings:"lnum" 1,"tnum" 1}
+  .bubble td,.bubble th{font-variant-numeric: lining-nums tabular-nums;font-feature-settings:"lnum" 1,"tnum" 1}
+  .bubble th,.bubble td{border:1px solid var(--line);padding:5px 10px;text-align:left;vertical-align:top}
+  .bubble th{background:var(--th-bg);font-weight:600;color:var(--th-fg);white-space:nowrap}
+  .bubble tbody tr:nth-child(even){background:var(--tr-alt)}
+  .bubble a{color:var(--accent)}
+  .bubble pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:11px 13px;overflow:auto;
+              margin:11px 0;font-family:var(--mono);font-size:12.5px;line-height:1.65;
+              font-variant-numeric: tabular-nums lining-nums;font-feature-settings:"tnum" 1,"lnum" 1}
+  .bubble code{background:var(--code-bg);padding:1.5px 5px;border-radius:4px;font-family:var(--mono);
+               font-size:.86em;color:var(--code-fg)}
+  .bubble pre code{background:none;padding:0}
+  .step{display:flex;align-items:center;gap:9px;color:var(--dim);font-size:10.5px;margin:8px 0 7px;letter-spacing:.4px}
+  .step .ln{flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
+  details.think{background:var(--think);border:1px dashed #2c3441;border-radius:9px;max-width:min(880px,94%)}
+  details.think>summary{cursor:pointer;padding:7px 12px;font-size:11.5px;color:var(--dim);list-style:none;display:flex;gap:7px;align-items:center}
+  details.think>summary::-webkit-details-marker{display:none}
+  details.think .bd{padding:0 13px 11px;color:#9aa5b4;font-size:12.5px;white-space:pre-wrap}
+  /* nested-view .tool rules retired: the ledger renders details.line */
+  details.tool>summary{cursor:pointer;padding:8px 12px;display:flex;gap:9px;align-items:center;font-size:12.5px;list-style:none}
+  details.tool>summary::-webkit-details-marker{display:none}
+  details.tool .nm{font-weight:600;font-family:ui-monospace,Consolas,monospace}
+  details.tool .st{margin-left:auto;font-size:10.5px;color:var(--dim)}
+  details.tool.running{border-color:color-mix(in srgb,var(--run) 45%,transparent)}
+  details.tool.running .st{color:var(--run)}
+  details.tool.completed .st{color:var(--ok)}
+  details.tool.failed .st{color:var(--bad)}
+  details.tool .bd{padding:0 12px 10px}
+  details.tool .lbl{color:var(--dim);font-size:10px;margin:7px 0 3px;letter-spacing:.5px}
+  details.tool pre{background:var(--code-bg);border:1px solid var(--line);border-radius:7px;padding:8px;margin:0;overflow:auto;
+                  max-height:320px;font-size:12px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace}
+  .caret{color:var(--dim);transition:transform .15s;display:inline-block}
+  details[open]>summary .caret{transform:rotate(90deg)}
+  .imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .imgs.strip{margin:4px 0 10px 0}
+  .imgs a{display:block;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--code-bg);max-width:100%}
+  .imgs img{display:block;max-width:100%;max-height:420px;object-fit:contain}
+  .imgs a:hover{border-color:var(--accent)}
+  #modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:99}
+  #modal.on{display:flex}
+  #modal .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;max-width:520px;
+              box-shadow:0 12px 40px rgba(0,0,0,.5)}
+  #modal .box h3{margin:0 0 8px;font-size:14px}
+  #modal .box p{margin:0 0 14px;color:var(--dim);font-size:12.5px;white-space:pre-wrap;line-height:1.7}
+  #modal .row{display:flex;gap:8px;justify-content:flex-end}
+  #modal button{border-radius:8px;padding:8px 16px;font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--fg)}
+  #modal button.danger{background:var(--danger-bg);border-color:var(--danger-border);color:var(--err-fg)}
+  #modal button.danger:hover{background:color-mix(in srgb,var(--err-fg) 16%,transparent)}
+  #m-opt{display:none;align-items:center;gap:8px;margin:0 0 14px;color:var(--fg);font-size:12.5px;cursor:pointer}
+  #m-opt.on{display:flex}
+  #m-opt input{accent-color:#f7768e;width:14px;height:14px;cursor:pointer}
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--toast-bg);border:1px solid var(--line);
+         color:var(--fg);padding:9px 16px;border-radius:9px;font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
+  #toast.on{opacity:1}
+  /* Codex-style ledger lines */
+  .ln{margin:1px 0}
+  details.line{border:1px solid transparent;border-radius:7px;background:var(--surface)}
+  details.line>summary{cursor:pointer;list-style:none;display:flex;gap:9px;align-items:center;
+                       padding:3px 10px;font-size:12px;min-height:22px}
+  details.line>summary::-webkit-details-marker{display:none}
+  details.line>summary:hover{background:var(--surface-hover)}
+  details.line .bd{padding:0 10px 7px;animation:reveal .16s ease-out}
+  @keyframes reveal{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+  details.line{transition:background .14s,border-color .14s}
+  details.line[open]{background:var(--surface2);border-color:var(--line)}
+  .v{color:var(--accent);min-width:34px;font-size:11.5px}
+  .v.dim{color:var(--dim)}
+  .tgt{color:var(--tgt-fg);font-family:var(--mono);font-size:11.5px;flex:1;
+       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .du{font-size:10.5px;color:var(--dim);margin-left:auto;font-variant-numeric:tabular-nums lining-nums;
+      background:var(--panel2);border-radius:4px;padding:0 5px}
+  .ts{font-size:10.5px;color:var(--dim);margin-left:6px;font-variant-numeric: tabular-nums lining-nums;
+      min-width:26px;text-align:right}
+  .ts.completed{color:var(--ok)} .ts.failed,.ts.error{color:var(--bad)} .ts.running{color:var(--run)}
+  details.line pre{background:var(--code-bg);border:1px solid var(--line);border-radius:6px;padding:7px;margin:3px 0 7px;
+                   overflow:auto;max-height:300px;font-size:11.5px;white-space:pre-wrap;word-break:break-word;
+                   font-family:ui-monospace,Consolas,monospace}
+  details.line .lbl{color:var(--dim);font-size:10px;margin:5px 0 2px;letter-spacing:.5px}
+  .thk{font-family:var(--serif);color:var(--thk-fg);font-size:13.5px;line-height:1.75;white-space:pre-wrap;
+       padding:2px 0 6px 11px;border-left:2px solid var(--thk-line);margin:6px 0}
+  .im{padding:3px 0}
+  .mi{border-top:1px solid var(--mi-line);padding-top:7px;margin-top:7px}
+  .mi:first-child{border-top:0;padding-top:0;margin-top:0}
+  .mh{color:var(--mh-fg);font-family:var(--mono);font-size:11.5px;margin-bottom:2px;word-break:break-all}
+  .tm2{margin-left:auto;color:var(--dim);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .pill{font-size:10.5px;padding:2px 9px;border-radius:999px;border:1px solid var(--line);
+        background:var(--panel2);color:var(--dim)}
+  .pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+  .pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+  .pill.warn{color:var(--run);border-color:color-mix(in srgb,var(--run) 45%,transparent);background:color-mix(in srgb,var(--run) 13%,transparent)}
+  #toolbar{display:flex;gap:6px;margin-left:auto}
+  #toolbar button{background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;
+                  padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
+  #toolbar button:hover{border-color:var(--accent);color:var(--accent)}
+  /* jump-to-bottom: appears only once you have scrolled away from the tail */
+  /* a band = the work between two narrative points, folded into one line */
+  .band>details{margin:2px 0}
+  .band>details>summary{display:flex;align-items:center;gap:9px;cursor:pointer;list-style:none;
+    padding:6px 10px;border:1px dashed var(--line);border-radius:8px;background:var(--surface);
+    font-family:var(--sans);font-size:12px;color:var(--dim)}
+  .band>details>summary::-webkit-details-marker{display:none}
+  .band>details>summary:hover{border-color:var(--accent);color:var(--fg)}
+  .band>details[open]>summary{border-style:solid;border-bottom-left-radius:0;border-bottom-right-radius:0;margin-bottom:0}
+  .band .bbd{padding:2px 0 4px 12px;border-left:2px solid var(--line);margin-left:6px}
+  #jump-bottom{position:fixed;right:18px;bottom:88px;width:34px;height:34px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;z-index:30;padding:0;
+    background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+    box-shadow:var(--sh-2);cursor:pointer;font-size:15px;line-height:1;
+    transition:border-color .12s,color .12s,transform .08s,background .12s}
+  #jump-bottom:hover{border-color:var(--accent);color:var(--accent);background:var(--surface-hover)}
+  #jump-bottom:active{transform:translateY(1px)}
+  /* already at the tail: stay visible, just fade, so it never disappears */
+  #jump-bottom.off{opacity:.35}
+  #composer{border-top:1px solid var(--line);background:linear-gradient(180deg,var(--comp-g1),var(--comp-g2));
+            padding:11px 14px;display:flex;gap:8px;align-items:flex-end;box-shadow:0 -6px 24px rgba(0,0,0,.28);z-index:2}
+  #composer textarea:focus,#composer input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(122,162,247,.12)}
+  #composer button{box-shadow:var(--sh-1);transition:filter .12s,transform .08s}
+  #composer button:hover:not(:disabled){filter:brightness(1.08)}
+  #composer button:active:not(:disabled){transform:translateY(1px)}
+  #composer textarea{flex:1;resize:none;height:46px;background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+                     border-radius:9px;padding:10px 12px;font:inherit;outline:none}
+  #composer textarea:focus{border-color:var(--accent)}
+  #composer button{background:var(--accent);color:var(--accent-fg);border:0;border-radius:9px;padding:11px 20px;font:inherit;font-weight:700;cursor:pointer}
+  #composer button:disabled{opacity:.45;cursor:default}
+  #hint{color:var(--dim);font-size:11px;padding:0 0 8px}
+
+  /* ---- light theme: same layout, flipped tokens ---- */
+  [data-theme="light"]{
+    --bg:#f6f5f2; --panel:#ffffff; --panel2:#f0efeb; --line:#e2ded6;
+    --fg:#23262c; --dim:#6d7583; --accent:#2563eb;
+    --run:#b45309; --ok:#15803d; --bad:#b91c1c;
+    --user:#eef3fd; --asst:#ffffff; --think:#faf9f6;
+    --surface:#faf9f6; --surface2:#f2f1ed; --surface-hover:#eeece7;
+    --code-bg:#edebe4; --code-fg:#1d3fa8;
+    --thk-fg:#6b7280; --thk-line:#dcd8d0;
+    --tgt-fg:#575f6b; --mh-fg:#3f4650; --mi-line:#e6e2da;
+    --head-g1:#ffffff; --head-g2:#faf9f7;
+    --side-g1:#fbfaf8; --side-g2:#f3f2ee;
+    --comp-g1:#ffffff; --comp-g2:#fbfaf8;
+    --th-bg:#f0efeb; --th-fg:#333a44; --tr-alt:#faf9f7;
+    --sel:#c7d7fe; --scroll:#d8d4cc; --scroll-h:#c4bfb6; --toast-bg:#ffffff;
+    --strong-fg:#111318; --h4-fg:#39404a; --quote-fg:#5b626c; --accent-fg:#ffffff;
+    --user-border:#cbd8ec; --final-bg:#edf7f0; --final-border:#bfe0cc;
+    --err-bg:#fdecee; --err-border:#f0c2c8; --err-fg:#9b1c2c;
+    --danger-soft:#fdecee; --danger-bg:#fdecee; --danger-border:#f0c2c8;
+    --sh-1:0 1px 2px rgba(28,25,20,.06);
+    --sh-2:0 4px 14px rgba(28,25,20,.07);
+    --sh-3:0 10px 34px rgba(28,25,20,.10);
+    color-scheme:light;
+  }
+  [data-theme="light"] .bubble{box-shadow:var(--sh-1)}
+  [data-theme="light"] .item.sel{box-shadow:inset 0 0 0 1px rgba(37,99,235,.10)}
+</style>
+<div id="side">
+  <div class="hd"><b id="cnt">SUBAGENTS</b><button id="clearbtn">清空</button><button id="newbtn">+ 新会话</button></div>
+  <div id="list"><div class="empty">连接中…</div></div>
+</div>
+<div id="main">
+  <div id="head"><div class="t" id="h-title">未选择</div><div class="m" id="h-meta"></div><div id="toolbar"><button id="expandAll">展开全部</button><button id="collapseAll">收起全部</button><button id="theme">浅色</button></div></div>
+  <div id="thread"><div class="empty">左侧选一个 subagent 继续聊，或点「+ 新会话」开一个</div></div>
+<button id="jump-bottom" title="回到底部（End）" aria-label="回到底部">↓</button>
+  <div id="modal"><div class="box"><h3 id="m-title"></h3><p id="m-body"></p>
+    <label id="m-opt"><input type="checkbox" id="m-purge"> 同时删除 DSH 磁盘上的 session（agent 的记忆）</label>
+    <div class="row"><button id="m-no">取消</button><button id="m-yes" class="danger">销毁</button></div></div></div>
+  <div id="toast"></div>
+  <div id="composer">
+    <textarea id="task" placeholder="给这个 subagent 发消息…  Ctrl+Enter"></textarea>
+    <button id="go">发送</button>
+  </div>
+</div>
+<script>
+"use strict";
+var convs = {}, selected = null, autoScroll = true;
+var nodeMap = {}, threadConv = null, tailEl = null, awaitingNew = false, knownIds = {};
+var thread = document.getElementById("thread");
+
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c];});}
+function md(src){
+  var parts = String(src == null ? "" : src).split(/\x60\x60\x60/);
+  return parts.map(function (p, i) {
+    if (i % 2 === 1) {                                   // fenced code
+      var m = p.match(/^[a-zA-Z0-9_-]*\n?([\s\S]*)$/);
+      return "<pre><code>" + esc(m ? m[1] : p) + "</code></pre>";
+    }
+    var lines = esc(p).split("\n");
+    var out = [], list = null;
+    function closeList() { if (list) { out.push("</" + list + ">"); list = null; } }
+    var cells = function (row) {
+      return row.replace(/^\||\|$/g, "").split("|").map(function (x) { return inline(x.trim()); });
+    };
+    for (var j = 0; j < lines.length; j++) {
+      var t = lines[j].trim();
+      if (!t) { closeList(); continue; }
+      if (/^\|.*\|$/.test(t)) {                          // table
+        closeList();
+        var rows = [];
+        while (j < lines.length && /^\|.*\|$/.test(lines[j].trim())) { rows.push(lines[j].trim()); j++; }
+        j--;
+        if (rows.length >= 2 && /^\|[\s:|-]+\|$/.test(rows[1])) {
+          out.push("<table><thead><tr>" + cells(rows[0]).map(function (x) { return "<th>" + x + "</th>"; }).join("") + "</tr></thead><tbody>"
+            + rows.slice(2).map(function (r) { return "<tr>" + cells(r).map(function (x) { return "<td>" + x + "</td>"; }).join("") + "</tr>"; }).join("")
+            + "</tbody></table>");
+        } else { out.push("<p>" + inline(rows.join(" ")) + "</p>"); }
+        continue;
+      }
+      var h = t.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { closeList(); out.push(h[1].length <= 3 ? "<h3>" + inline(h[2]) + "</h3>" : "<h4>" + inline(h[2]) + "</h4>"); continue; }
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { closeList(); out.push("<hr>"); continue; }
+      var q = t.match(/^&gt;\s?(.*)$/);                   // esc() already turned > into &gt;
+      if (q) { closeList(); out.push("<blockquote>" + inline(q[1]) + "</blockquote>"); continue; }
+      var ul = t.match(/^[-*+]\s+(.*)$/);
+      if (ul) { if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; } out.push("<li>" + inline(ul[1]) + "</li>"); continue; }
+      var ol = t.match(/^\d+[.)]\s+(.*)$/);
+      if (ol) { if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; } out.push("<li>" + inline(ol[1]) + "</li>"); continue; }
+      closeList();
+      out.push("<p>" + inline(t) + "</p>");
+    }
+    closeList();
+    return out.join("");
+  }).join("");
+}
+function inline(h){
+  h = h.replace(/\x60([^\x60\n]+)\x60/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  h = h.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  return h;
+}
+function imgHtml(b){
+  if(!b.images||!b.images.length) return "";
+  return '<div class="imgs">'+b.images.map(function(p){
+    var u="/api/file?path="+encodeURIComponent(p);
+    return '<a href="'+u+'" target="_blank" title="'+esc(p)+'"><img src="'+u+'" alt="'+esc(p)+'" loading="lazy"></a>';
+  }).join("")+"</div>";
+}
+/* Images belong beside the action, not buried in its collapsed body: the ledger
+   stays one line per action, but a row that produced pictures shows them at once. */
+function imgStrip(blocks){
+  var seen = {}, out = [];
+  (blocks || []).forEach(function (b) {
+    if (!b || !b.images) return;
+    b.images.forEach(function (p) {
+      if (seen[p]) return;
+      seen[p] = 1;
+      var u = "/api/file?path=" + encodeURIComponent(p);
+      out.push('<a href="' + u + '" target="_blank" title="' + esc(p) + '">'
+             + '<img src="' + u + '" alt="' + esc(p) + '" loading="lazy"></a>');
+    });
+  });
+  return out.length ? '<div class="imgs strip">' + out.join("") + "</div>" : "";
+}
+/* native confirm()/alert() can be blocked in embedded webviews, so use in-page UI */
+var _resolveAsk = null;
+function askConfirm(title, body, yesLabel, withPurge){
+  document.getElementById("m-title").textContent = title;
+  document.getElementById("m-body").textContent = body;
+  document.getElementById("m-yes").textContent = yesLabel || "销毁";
+  var opt=document.getElementById("m-opt");
+  opt.classList.toggle("on", !!withPurge);
+  if(withPurge) document.getElementById("m-purge").checked = true;   // default to a real destroy
+  document.getElementById("modal").classList.add("on");
+  return new Promise(function(res){ _resolveAsk = res; });
+}
+function _closeAsk(v){
+  document.getElementById("modal").classList.remove("on");
+  if(_resolveAsk){ var r=_resolveAsk; _resolveAsk=null; r(v); }
+}
+function toast(msg){
+  var t=document.getElementById("toast");
+  t.textContent=msg; t.classList.add("on");
+  clearTimeout(t._h); t._h=setTimeout(function(){ t.classList.remove("on"); }, 2600);
+}
+/* surface uncaught errors on the page instead of failing silently */
+window.addEventListener("error", function(e){
+  var t=document.getElementById("toast");
+  if(t){ t.textContent="页面脚本错误：" + (e.message||e.type); t.classList.add("on"); }
+});
+window.addEventListener("unhandledrejection", function(e){
+  var t=document.getElementById("toast");
+  if(t){ t.textContent="未处理的错误：" + (e.reason && e.reason.message ? e.reason.message : e.reason); t.classList.add("on"); }
+});
+function ago(ms){
+  if (!ms) return "";
+  var s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  return Math.floor(s / 86400) + " 天前";
+}
+function keyOf(b,i){ return b.id || (b.kind+"-"+i); }
+function dotEl(st){ var s = st==="completed" ? "done" : st; return '<span class="dot '+s+'"></span>'; }
+
+/* ============ Codex-style flat ledger ============
+   One line per action: verb + target, clicked open for detail. No nesting,
+   no turn/step summary rows, no status icons -- matching Codex's
+   "[desktop] conversationDetailMode = STEPS_COMMANDS" look. */
+var openKeys = {};
+function shouldOpen(k, auto){ return openKeys[k] !== undefined ? openKeys[k] : !!auto; }
+
+var VERB = { pwsh: "运行", bash: "运行", read: "读取", write: "写入", edit: "编辑",
+             grep: "搜索", glob: "搜索", todo_write: "计划", job_output: "任务",
+             job_list: "任务", job_cancel: "任务", job_kill: "任务", present: "展示",
+             read_image: "看图", web_search: "搜索", web_fetch: "抓取",
+             str_replace_editor: "编辑" };
+function verbOf(n){ return VERB[n] || n || "工具"; }
+
+/** Long absolute paths are noise; Codex shows the tail. Keep the last two segments. */
+function shortPath(p){
+  var s = String(p).replace(/\\/g, "/");
+  var parts = s.split("/").filter(Boolean);
+  if (parts.length <= 2) return s;
+  return "…/" + parts.slice(-2).join("/");
+}
+function targetOf(b){
+  var i = b.input || {};
+  if (i.command) return String(i.command).split("\n")[0];
+  if (i.file_path) return shortPath(i.file_path);
+  if (i.path && !i.pattern) return shortPath(i.path);
+  if (i.pattern) return String(i.pattern) + (i.path ? "  " + shortPath(i.path) : "");
+  if (i.todos) return (i.todos.length || 0) + " 项待办";
+  if (i.job_id) return String(i.job_id) + (i.wait ? " (等待)" : "");
+  if (i.name) return String(i.name);
+  try { var j = JSON.stringify(i); return j === "{}" ? "" : j; } catch (e) { return ""; }
+}
+function itemSig(b){
+  if (!b) return "";
+  // lengths matter: thinking and tool output arrive in chunks, and a count-only
+  // signature would freeze them in the DOM. images must be in here too -- a row
+  // rendered before its picture paths were harvested would never be redrawn.
+  return (b.kind || "") + ":" + String(b.text || "").length + ":"
+       + String(b.result || "").length + ":" + (b.status || "") + ":"
+       + (b.images ? b.images.length + "@" + b.images.join(",").length : 0);
+}
+function groupImgsSig(g){
+  var n = 0, l = 0;
+  (g.items || []).forEach(function (x) { var i = x.b && x.b.images; if (i) { n += i.length; l += i.join(",").length; } });
+  return n + "@" + l;
+}
+function lineSummary(b){
+  if (b.kind === "think") return '<span class="v dim">思考</span>';
+  var st = b.status || "running";
+  return '<span class="v">' + esc(verbOf(b.name)) + '</span>'
+       + '<span class="tgt">' + esc(targetOf(b).slice(0, 120)) + '</span>'
+       + (groupMs(g) ? '<span class="du">' + dur(groupMs(g)) + '</span>' : '')
+       + '<span class="ts ' + st + '">' + esc(st === "completed" ? "完成" : st) + '</span>';
+}
+function lineBody(b){
+  if (b.kind === "think") return '<div class="thk">' + esc(b.text) + '</div>';
+  var inp = "";
+  if (b.input && b.input.command) inp = "$ " + b.input.command;
+  else if (b.input) { try { inp = JSON.stringify(b.input, null, 2); } catch (e) { inp = String(b.input); } }
+  var out = (b.result == null || b.result === "") ? "" : String(b.result);
+  var shown = out.length > 6000 ? out.slice(0, 6000) + "\n… (截断)" : out;
+  var h = "";
+  if (inp) h += '<div class="lbl">INPUT</div><pre>' + esc(inp) + '</pre>';
+  if (out) h += '<div class="lbl">OUTPUT</div><pre>' + esc(shown) + '</pre>';
+  if (!inp && !out) h += '<div class="lbl">等待中…</div>';
+  return h + imgHtml(b);
+}
+function contentHtml(b){
+  if (b.kind === "user") return '<div class="who" style="text-align:right">你</div><div class="bubble ub"><div class="bd">' + esc(b.text) + '</div></div>';
+  if (b.kind === "msg") return '<div class="who">DSH</div><div class="bubble asst"><div class="bd">' + md(b.text) + imgHtml(b) + '</div></div>';
+  if (b.kind === "final") return '<div class="who">最终答复</div><div class="bubble final"><div class="bd">' + md(b.text) + imgHtml(b) + '</div></div>';
+  if (b.kind === "error") return '<div class="who" style="color:#f7768e">失败</div><div class="bubble errb"><div class="bd">' + esc(b.text) + '</div></div>';
+  return "";
+}
+/* ---- fold thinking into the action it precedes, then merge same-kind runs ----
+   DSH emits tool -> think -> tool -> think, so standalone reasoning rows both
+   waste height and prevent adjacent actions from merging. Attaching reasoning to
+   the following action fixes both, and the ledger stays flat. */
+function buildRows(blocks){
+  var seq = [], pending = [];
+  for (var i = 0; i < blocks.length; i++) {
+    var b = blocks[i];
+    if (b.kind === "step") continue;              // dividers carry no content
+    if (b.kind === "think") { pending.push(b.text); continue; }
+    if (b.kind === "tool") {
+      seq.push({ kind: "tool", b: b, think: pending.join("\n\n") });
+      pending = [];
+      continue;
+    }
+    if (pending.length) { seq.push({ kind: "think", key: "t" + i, text: pending.join("\n\n") }); pending = []; }
+    seq.push({ kind: "content", key: "c" + (b.id || i), b: b });
+  }
+  if (pending.length) seq.push({ kind: "think", key: "t-end", text: pending.join("\n\n") });
+
+  var rows = [];
+  for (var j = 0; j < seq.length; j++) {
+    var r = seq[j], last = rows[rows.length - 1];
+    if (r.kind !== "tool") { rows.push(r); continue; }
+    if (last && last.kind === "group" && last.name === r.b.name) last.items.push(r);
+    else rows.push({ kind: "group", name: r.b.name, key: "g" + (r.b.id || j), items: [r] });
+  }
+
+  /* Fold the work between two narrative points into one collapsible band.
+     User messages and final answers stay outside: they are the story, and
+     burying them would make the transcript unreadable. */
+  var out = [], band = [];
+  function flushBand() {
+    if (!band.length) return;
+    if (band.length === 1) { out.push(band[0]); band = []; return; }
+    var tools = 0, think = 0;
+    band.forEach(function (r) { if (r.kind === "group") tools += r.items.length; else think++; });
+    out.push({ kind: "band", key: "b" + (band[0].key || out.length), rows: band,
+               nTools: tools, nThink: think });
+    band = [];
+  }
+  for (var m = 0; m < rows.length; m++) {
+    var rr = rows[m];
+    if (rr.kind === "content" && (rr.b.kind === "final" || rr.b.kind === "user" ||
+                                  rr.b.kind === "error" || rr.b.kind === "msg")) { flushBand(); out.push(rr); }
+    else band.push(rr);
+  }
+  flushBand();
+  return out;
+}
+function bandSummary(band){
+  if (!band || !band.rows) return "";
+  var parts = [];
+  if (band.nTools) parts.push(band.nTools + " 个动作");
+  if (band.nThink) parts.push(band.nThink + " 段思考");
+  var failed = band.rows.some(function (r) { return r.kind === "group" && groupStatus(r) === "failed"; });
+  var running = band.rows.some(function (r) { return r.kind === "group" && groupStatus(r) === "running"; });
+  var ms = 0;
+  band.rows.forEach(function (r) { if (r.kind === "group") ms += groupMs(r); });
+  return '<span class="v dim">' + esc(parts.join(" · ")) + '</span>'
+       + (ms ? '<span class="du">' + dur(ms) + '</span>' : '')
+       + '<span class="ts ' + (failed ? "failed" : running ? "running" : "completed") + '">'
+       + (failed ? "有失败" : running ? "进行中" : "完成") + '</span>';
+}
+function groupStatus(g){
+  if (!g || !g.items) return "running";
+  var t = g.items.map(function (x) { return x.b.status || "running"; });
+  if (t.some(function (s) { return s === "failed" || s === "error"; })) return "failed";
+  if (t.every(function (s) { return s === "completed"; })) return "completed";
+  return "running";
+}
+function groupSig(g){
+  if (!g || !g.items) return "";
+  return g.items.map(function (x) { return itemSig(x.b) + ":" + x.think.length + ":" + (x.b.ms || 0); }).join("|")
+       + "|img:" + groupImgsSig(g);
+}
+function dur(ms){
+  if (!ms || ms < 0) return "";
+  if (ms < 1000) return Math.round(ms) + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  return Math.floor(ms / 60000) + "m" + String(Math.round((ms % 60000) / 1000)).padStart(2, "0") + "s";
+}
+function groupMs(g){
+  if (!g || !g.items) return 0;
+  return g.items.reduce(function (a, x) { return a + (x.b.ms || 0); }, 0);
+}
+var UNIT = { pwsh: "条命令", bash: "条命令", read: "个文件", write: "个文件", edit: "个文件",
+             grep: "次搜索", glob: "次搜索", todo_write: "次计划", job_output: "个任务",
+             job_list: "次查询", job_kill: "次取消", present: "次展示", read_image: "张图",
+             web_search: "次搜索", web_fetch: "次抓取", str_replace_editor: "次编辑" };
+function unitOf(n){ return UNIT[n] || "项"; }
+function groupSummary(g){
+  if (!g || !g.items || !g.items.length) return '<span class="v dim">（无）</span>';
+  var n = g.items.length, st = groupStatus(g), v = verbOf(g.name);
+  // A merged row names the KIND and the count; every target is still listed one
+  // level down, so nothing is lost.
+  var label = n > 1 ? v + " " + n + " " + unitOf(g.name) : v;
+  var tgt = n > 1 ? "" : targetOf(g.items[0].b).slice(0, 96);
+  return '<span class="v">' + esc(label) + '</span>'
+       + '<span class="tgt">' + esc(tgt) + '</span>'
+       + '<span class="ts ' + st + '">' + esc(st === "completed" ? "完成" : st) + '</span>';
+}
+function actionBody(x){
+  var h = "", b = (x && x.b) || {};
+  if (x.think) h += '<div class="thk">' + esc(x.think) + '</div>';
+  var inp = "";
+  if (b.input && b.input.command) inp = "$ " + b.input.command;
+  else if (b.input) { try { inp = JSON.stringify(b.input, null, 2); } catch (e) { inp = String(b.input); } }
+  var out = (b.result == null || b.result === "") ? "" : String(b.result);
+  var shown = out.length > 6000 ? out.slice(0, 6000) + "\n… (截断)" : out;
+  if (inp) h += '<div class="lbl">INPUT</div><pre>' + esc(inp) + '</pre>';
+  if (out) h += '<div class="lbl">OUTPUT</div><pre>' + esc(shown) + '</pre>';
+  if (!inp && !out && !x.think) h += '<div class="lbl">等待中…</div>';
+  return h;   // images are rendered by imgStrip() beside the action line
+}
+function groupBody(g){
+  if (!g || !g.items || !g.items.length) return "";
+  if (g.items.length === 1) return actionBody(g.items[0]);
+  return g.items.map(function (x) {
+    return '<div class="mi"><div class="mh">' + esc(targetOf(x.b).slice(0, 140)) + '</div>' + actionBody(x) + '</div>';
+  }).join("");
+}
+function bandSig(band){
+  if (!band || !band.rows) return "";
+  return band.rows.map(function (r) {
+    return r.kind === "group" ? groupSig(r) : r.kind === "think" ? "t:" + r.text.length : itemSig(r.b);
+  }).join("~");
+}
+/* Rows inside a band render exactly like top-level rows, minus the outer div. */
+function renderInnerRow(r){
+  if (!r) return "";
+  var k = r.key;
+  if (r.kind === "think") {
+    return '<div class="ln"><details class="line" data-key="' + k + '"><summary><span class="v dim">思考</span></summary>'
+      + '<div class="bd"><div class="thk">' + esc(r.text) + '</div></div></details></div>';
+  }
+  return '<div class="ln"><details class="line ' + groupStatus(r) + '" data-key="' + k + '"><summary>'
+    + groupSummary(r) + '</summary><div class="bd">' + groupBody(r) + '</div></details>'
+    + imgStrip((r.items || []).map(function (x) { return x.b; })) + '</div>';
+}
+function renderThread(){
+  var v = selected ? convs[selected] : null;
+  if (!v) { thread.innerHTML = '<div class="empty"><b>选择一个 subagent</b>左侧点一个继续聊，或点右上角「+ 新会话」开一个新的</div>'; nodeMap = {}; threadConv = null; return; }
+  if (threadConv !== selected) { thread.innerHTML = ""; nodeMap = {}; threadConv = selected; }
+
+  var rows = buildRows(v.blocks || []);
+  var seen = {}, lastAction = null, lastBandKey = null;
+  rows.forEach(function (r) { if (r.kind === "band") lastBandKey = r.key; });
+
+  rows.forEach(function (r) {
+    var k = r.key;
+    if (seen[k]) return;
+    seen[k] = 1;
+    var el = nodeMap[k];
+    if (!el) { el = document.createElement("div"); nodeMap[k] = el; thread.appendChild(el); }
+
+    var sig = r.kind === "content" ? itemSig(r.b)
+            : r.kind === "think" ? "t:" + r.text.length
+            : r.kind === "band" ? "band:" + bandSig(r)
+            : groupSig(r);
+    if (el.dataset.sig === sig) return;
+    el.dataset.sig = sig;
+
+    if (r.kind === "content") { el.className = "turn"; el.innerHTML = contentHtml(r.b); return; }
+
+    if (r.kind === "band") {
+      el.className = "band";
+      el.innerHTML = '<details data-key="' + k + '"><summary>' + bandSummary(r) + '</summary>'
+        + '<div class="bbd">' + r.rows.map(renderInnerRow).join("") + '</div></details>';
+      var bd = el.querySelector("details");
+      bd.open = openKeys[k] !== undefined ? openKeys[k]
+              : (v.status === "running" && k === lastBandKey);
+      bd.addEventListener("toggle", function () { openKeys[k] = bd.open; });
+      return;
+    }
+
+    el.className = "ln";
+    if (r.kind === "think") {
+      el.innerHTML = '<details class="line" data-key="' + k + '"><summary><span class="v dim">思考</span></summary>'
+        + '<div class="bd"><div class="thk">' + esc(r.text) + '</div></div></details>';
+    } else {
+      el.innerHTML = '<details class="line ' + groupStatus(r) + '" data-key="' + k + '"><summary>' + groupSummary(r) + '</summary>'
+        + '<div class="bd">' + groupBody(r) + '</div></details>'
+        + imgStrip((r.items || []).map(function (x) { return x.b; }));
+    }
+    var d = el.querySelector("details");
+    d.open = shouldOpen(k, v.status === "running" && k === lastAction);
+    d.addEventListener("toggle", function () { openKeys[k] = d.open; });
+  });
+
+  Object.keys(nodeMap).forEach(function (k) {
+    if (!seen[k]) { var e = nodeMap[k]; if (e && e.parentNode) e.parentNode.removeChild(e); delete nodeMap[k]; }
+  });
+
+  if (v.status === "running") {
+    if (!tailEl) { tailEl = document.createElement("div"); tailEl.className = "turn"; tailEl.innerHTML = '<div class="who live"><span class="b"></span><span class="tx">工作中</span></div>'; }
+    thread.appendChild(tailEl);
+    tailEl.querySelector(".tx").textContent = "工作中 " + (v.elapsed || 0).toFixed(0) + "s";
+  } else if (tailEl && tailEl.parentNode) tailEl.parentNode.removeChild(tailEl);
+  if (autoScroll) thread.scrollTop = thread.scrollHeight;
+  syncJump();
+}
+function setAllOpen(v){
+  thread.querySelectorAll("details").forEach(function (d) {
+    d.open = v;
+    if (d.dataset.key) openKeys[d.dataset.key] = v;
+  });
+}
+function renderList(){
+  var el=document.getElementById("list");
+  var ids=Object.keys(convs).sort(function(a,b){return (convs[b].updatedAt||0)-(convs[a].updatedAt||0)});
+  if(!ids.length){ el.innerHTML='<div class="empty"><b>还没有 subagent</b>点「+ 新会话」开始</div>'; return; }
+  el.innerHTML=ids.map(function(id){ var v=convs[id];
+    return '<div class="item'+(id===selected?" sel":"")+'" data-id="'+esc(id)+'">'
+      +'<div class="top">'+dotEl(v.status)+'<b style="font-size:11.5px">'+esc(id.slice(0,22))+'</b>'
+      +(v._mirror?'<span style="font-size:10px;color:var(--dim)">只读镜像</span>':'<span class="x" data-x="'+esc(id)+'" title="销毁这个会话（连同日志与 DSH session）">&#215;</span>')
+      +'<span class="tm2">'+(v.status==="running"?(v.elapsed||0).toFixed(0)+"s":ago(v.updatedAt))+'</span></div>'
+      +'<div class="ttl">'+esc(v.title||"(新会话)")+'</div>'
+      +'<div class="sub">'+esc(v.status==="running"?"运行中":v.status==="interrupted"?"已中断":v.status)+" · "+(v.calls||0)+' 次工具调用</div></div>';
+  }).join("");
+  el.querySelectorAll(".item").forEach(function(n){ n.onclick=function(){ selected=n.dataset.id; renderList(); renderHead(); renderThread(); }; });
+  var c=document.getElementById("cnt"); if(c) c.textContent="SUBAGENTS ("+ids.length+")";
+  el.querySelectorAll(".x").forEach(function(x){
+    x.onclick=function(ev){
+      ev.stopPropagation();
+      var id=x.dataset.x;
+      askConfirm("销毁这个会话？", id + "\n\n会删除：对话记录、每轮日志、以及 DSH 磁盘上的 session（agent 的记忆）。", "销毁").then(function(yes){
+        if(!yes) return;
+        fetch("/api/forget",{method:"POST",headers:{"content-type":"application/json"},
+          body:JSON.stringify({conversation_id:id})})
+         .then(function(r){return r.json()})
+         .then(function(d){
+            delete convs[id]; delete knownIds[id];
+            if(selected===id){ selected=null; nodeMap={}; threadConv=null; }
+            renderAll();
+            toast("已销毁 " + ((d.removed||[]).length) + " 个会话");
+         })
+         .catch(function(e){ toast("销毁失败：" + e.message); });
+      });
+    };
+  });
+}
+function renderHead(){
+  var v=selected?convs[selected]:null, t=document.getElementById("h-title"), m=document.getElementById("h-meta");
+  var mirror=!!(v&&v._mirror);
+  document.getElementById("go").disabled=mirror;
+  document.getElementById("task").disabled=mirror;
+  document.getElementById("task").placeholder=mirror?"当前为真实任务日志镜像；续聊由 Codex 使用原 MCP 会话派发":"给这个 subagent 发消息…  Ctrl+Enter";
+  document.getElementById("clearbtn").disabled=Object.keys(convs).some(function(k){return convs[k]._mirror;});
+  if(!v){ t.textContent="未选择"; m.innerHTML=""; return; }
+  t.innerHTML=dotEl(v.status)+" <span style='font-size:12.5px'>"+esc(v.id)+"</span> "
+    +(v.status==="running"
+        ? '<span class="live"><span class="b"></span>运行中 '+(v.elapsed||0).toFixed(0)+"s</span>"
+        : '<span class="pill '+(v.status==="done"?"ok":v.status==="interrupted"?"warn":"bad")+'">'
+        +esc(v.status==="interrupted"?"已中断":v.status)+"</span>");
+  m.innerHTML="<span>"+(v.calls||0)+" 次工具调用</span><span>"+(mirror?esc(v._mirror_note||"当前项目真实桥日志，只读镜像"):"上下文已保留（同一 session）")+"</span>";
+}
+function renderAll(){ renderList(); renderHead(); renderThread(); }
+
+function atBottom(){ return (thread.scrollHeight-thread.scrollTop-thread.clientHeight)<50; }
+/* Show the button only when there is something to scroll back to. */
+function syncJump(){
+  var jb=document.getElementById("jump-bottom"); if(!jb) return;
+  // Always present; only faded when there is nothing left to scroll to.
+  jb.classList.toggle("off", atBottom());
+}
+var _jb=document.getElementById("jump-bottom");
+if(_jb) _jb.addEventListener("click",function(){ autoScroll=true; thread.scrollTop=thread.scrollHeight; syncJump(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="End" && !/^(INPUT|TEXTAREA)$/.test((document.activeElement||{}).tagName||"")){
+    autoScroll=true; thread.scrollTop=thread.scrollHeight; syncJump();
+  }
+});
+thread.addEventListener("scroll",function(){ autoScroll=atBottom(); syncJump(); });
+
+var es=new EventSource("/api/stream");
+es.onmessage=function(e){
+  var d=JSON.parse(e.data);
+  if(d.kind==="snapshot"){
+    (d.conversations||[]).forEach(function(v){ convs[v.id]=v; knownIds[v.id]=1; });
+  } else if(d.kind==="removed"){
+    delete convs[d.id];
+    if(selected===d.id){ selected=null; nodeMap={}; threadConv=null; }
+  } else if(d.kind==="conv"){
+    var isNew=!knownIds[d.conv.id];
+    convs[d.conv.id]=d.conv; knownIds[d.conv.id]=1;
+    if(awaitingNew&&isNew){ selected=d.conv.id; awaitingNew=false; }
+    if(!selected) selected=d.conv.id;
+  }
+  renderAll();
+};
+es.onerror=function(){ document.getElementById("h-title").textContent="连接断开，重试中…"; };
+/* Read-only project mirror: an occupied dashboard port may belong to a
+   different MCP instance. Preserve this interface without stopping either
+   bridge. The mirror cannot send prompts or purge sessions. */
+async function refreshProjectMirror(){
+  try{
+    var r=await fetch("http://127.0.0.1:8801/api/native-conversations",{cache:"no-store"});
+    if(!r.ok)return;
+    var views=await r.json();
+    views.forEach(function(v){
+      // Never replace a genuinely live local conversation with a replay.
+      if(!convs[v.id]||convs[v.id]._mirror){convs[v.id]=v;knownIds[v.id]=1;}
+    });
+    if(!selected&&views.length)selected=views.sort(function(a,b){return b.updatedAt-a.updatedAt})[0].id;
+    renderAll();
+  }catch(e){/* Native bridge remains usable if the optional mirror is offline. */}
+}
+/* Project mirror is optional and its host (8801) is usually absent. Probing
+   every 2s produced a failed request plus a full renderAll(); probe once. */
+setTimeout(refreshProjectMirror, 300);
+setInterval(function(){
+  var k=Object.keys(convs), live=false;
+  for(var i=0;i<k.length;i++) if(convs[k[i]].status==="running"){ convs[k[i]].elapsed=(convs[k[i]].elapsed||0)+0.5; live=true; }
+  if(live){ renderList(); renderHead(); if(selected&&convs[selected]&&convs[selected].status==="running") renderThread(); }
+},500);
+
+var themeBtn=document.getElementById("theme");
+function applyTheme(t){
+  document.documentElement.setAttribute("data-theme", t);
+  if(themeBtn) themeBtn.textContent = t === "light" ? "深色" : "浅色";
+  try { localStorage.setItem("dsh-theme", t); } catch(e){}
+}
+(function(){
+  var saved=null; try { saved=localStorage.getItem("dsh-theme"); } catch(e){}
+  var sysLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (sysLight ? "light" : "dark"));
+})();
+if(themeBtn) themeBtn.onclick=function(){
+  applyTheme(document.documentElement.getAttribute("data-theme")==="light" ? "dark" : "light");
+};
+document.getElementById("expandAll").onclick=function(){ setAllOpen(true); };
+document.getElementById("collapseAll").onclick=function(){ setAllOpen(false); };
+var goBtn=document.getElementById("go"), taskEl=document.getElementById("task");
+document.getElementById("clearbtn").onclick=function(){
+  var n=Object.keys(convs).length;
+  if(!n){ toast("没有会话"); return; }
+  askConfirm("清空全部 " + n + " 个会话？", "会删除：列表条目、每轮日志，以及（按下方勾选）DSH 磁盘上的 session。\n\n此操作不可撤销。", "全部销毁", true)
+   .then(function(yes){
+    if(!yes) return;
+    var purge = document.getElementById("m-purge").checked;
+    fetch("/api/forget",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({all:true, purge_sessions:purge})})
+     .then(function(r){return r.json()}).then(function(d){
+        convs={}; knownIds={}; selected=null; nodeMap={}; threadConv=null;
+        renderAll();
+        toast("已销毁 " + (d.removed||[]).length + " 个会话");
+     })
+     .catch(function(e){ toast("清空失败：" + e.message); });
+  });
+};
+document.getElementById("newbtn").onclick=function(){ selected=null; renderList(); renderHead(); renderThread(); taskEl.focus(); };
+function submitMsg(){
+  if(selected&&convs[selected]&&convs[selected]._mirror){toast("只读镜像：请通过 Codex 原 MCP 会话续聊");return;}
+  var msg=taskEl.value.trim(); if(!msg||goBtn.disabled) return;
+  goBtn.disabled=true; goBtn.textContent="发送中…";
+  var payload={message:msg,timeout_ms:1800000};
+  if(selected) payload.conversation_id=selected; else awaitingNew=true;
+  fetch("/api/send",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)})
+   .then(function(r){return r.json()}).then(function(d){
+     if(d.error){ awaitingNew=false; toast("失败: "+JSON.stringify(d)); }
+     else { taskEl.value=""; if(d.conversation_id) selected=d.conversation_id; }
+   }).catch(function(e){ awaitingNew=false; toast("失败: "+e.message); })
+   .finally(function(){ goBtn.disabled=false; goBtn.textContent="发送"; });
+}
+document.getElementById("m-no").onclick=function(){ _closeAsk(false); };
+document.getElementById("m-yes").onclick=function(){ _closeAsk(true); };
+document.getElementById("modal").onclick=function(e){ if(e.target.id==="modal") _closeAsk(false); };
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") _closeAsk(false); });
+goBtn.onclick=submitMsg;
+taskEl.addEventListener("keydown",function(e){ if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); submitMsg(); } });
+</script>
+</html>

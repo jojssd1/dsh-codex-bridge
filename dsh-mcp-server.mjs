@@ -135,6 +135,14 @@ function conversationView(conv) {
   };
 }
 
+/** Same fields as conversationView minus the blocks: cheap enough to send 1 Hz. */
+function conversationBrief(conv) {
+  const v = conversationView(conv);
+  delete v.blocks;
+  v.nBlocks = (conv.baseBlocks.length + (conv.run ? conv.run.blocks.length + 1 : 0));
+  return v;
+}
+
 function summarize(ev) {
   switch (ev.type) {
     case "session": return "session " + ev.sessionId;
@@ -724,6 +732,16 @@ function snapshot() {
     conversations: [...conversations.values()].map(conversationView),
   };
 }
+/* The 1 Hz SSE snapshot used to carry every block of every conversation: ~12 MB
+   per tick, i.e. 42 GB/hour pushed into the browser, which spent all its time
+   parsing and never finished a paint. Only metadata goes out on the timer now;
+   a conversation's body is sent when it actually changes. */
+function snapshotBrief() {
+  return {
+    runs: [...runs.values()].map(summarizeRun),
+    conversations: [...conversations.values()].map((c) => conversationBrief(c)),
+  };
+}
 function publishState(s) { publish({ kind: "state", run: summarizeRun(s) }); }
 const PAGE_PATH = join(HERE, "dashboard.html");
 /** Served from disk every request, so editing dashboard.html needs no restart. */
@@ -759,11 +777,12 @@ function startHttpServer() {
       res.end(JSON.stringify({ ok: true, applied }));
     } else if (url === "/api/runs") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(snapshot().runs, null, 1));
+      res.end(JSON.stringify(snapshot().runs));
     } else if (url === "/api/stream") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       sseClients.add(res);
-      res.write("data: " + JSON.stringify({ kind: "snapshot", runs: snapshot().runs, conversations: snapshot().conversations }) + "\n\n");
+      const s0 = snapshotBrief();
+      res.write("data: " + JSON.stringify({ kind: "snapshot", runs: s0.runs, conversations: s0.conversations }) + "\n\n");
       req.on("close", () => sseClients.delete(res));
     } else if (url === "/api/run" && req.method === "POST") {
       const body = await readBody(req);
@@ -849,12 +868,27 @@ function startHttpServer() {
     try { writeFileSync(HUB_STATE, JSON.stringify({ pid: process.pid, port: DASH_PORT, role: HUB_MODE ? "hub" : "inline", startedAt: Date.now() })); } catch {}
     log("dashboard on http://127.0.0.1:" + DASH_PORT + "  role=" + (HUB_MODE ? "hub" : "inline"));
   });
-  setInterval(() => { const s = snapshot(); publish({ kind: 'snapshot', runs: s.runs, conversations: s.conversations }); }, 1000).unref();
-  // A hub must not outlive its usefulness: exit once nobody is watching and nothing is ingesting.
+  setInterval(() => { const s = snapshotBrief(); publish({ kind: 'snapshot', runs: s.runs, conversations: s.conversations }); }, 1000).unref();
+  /* A hub must not outlive its usefulness, but "no events recently" is the wrong
+     test: the dashboard matters MOST exactly when forwarding has stopped, because
+     that is when you go back to read what happened to the interrupted runs. It
+     used to exit after 30 idle minutes whenever no tab happened to be open, and
+     the page then spun forever against a dead port.
+
+     Exit only when BOTH hold:
+       - nobody is watching (no SSE client), and
+       - no MCP instance has registered for far longer (default 8h).
+     Instances re-register on their 5s heartbeat, so any live Codex conversation
+     keeps the hub alive indefinitely. */
   setInterval(() => {
-    const idle = Number(process.env.DSH_HUB_IDLE_MS ?? 1800000);
-    if (HUB_MODE && idle > 0 && sseClients.size === 0 && Date.now() - lastActivity > idle) {
-      log("hub idle for " + Math.round(idle / 1000) + "s with no viewers; exiting");
+    const idle = Number(process.env.DSH_HUB_IDLE_MS ?? 28800000);
+    if (!HUB_MODE || idle <= 0) return;
+    if (sseClients.size > 0) return;
+    const stale = Date.now() - lastActivity > idle;
+    let anyInstance = false;
+    for (const [, t] of instances) if (Date.now() - t < 900000) { anyInstance = true; break; }
+    if (stale && !anyInstance) {
+      log("hub idle for " + Math.round(idle / 1000) + "s with no viewers and no instances; exiting");
       process.exit(0);
     }
   }, 60000).unref();

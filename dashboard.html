@@ -762,11 +762,32 @@ document.addEventListener("keydown",function(e){
 });
 thread.addEventListener("scroll",function(){ autoScroll=atBottom(); syncJump(); });
 
+/* Bodies are fetched per conversation; the 1 Hz snapshot carries metadata only. */
+var _loading={};
+async function loadBody(id){
+  if(!id||_loading[id])return;
+  var v=convs[id]; if(v&&v._loaded)return;
+  _loading[id]=1;
+  try{
+    var r=await fetch("/api/conversations?full=1&id="+encodeURIComponent(id),{cache:"no-store"});
+    if(!r.ok)return;
+    var arr=await r.json();
+    var one=arr&&arr[0];
+    if(one){ one._loaded=1; convs[id]=one; renderAll(); }
+  }catch(e){} finally{ delete _loading[id]; }
+}
 var es=new EventSource("/api/stream");
 es.onmessage=function(e){
   var d=JSON.parse(e.data);
   if(d.kind==="snapshot"){
-    (d.conversations||[]).forEach(function(v){ convs[v.id]=v; knownIds[v.id]=1; });
+    /* Metadata only. Keep whatever body we already hold, otherwise a snapshot
+       would blank a conversation the user is reading. */
+    (d.conversations||[]).forEach(function(v){
+      var old=convs[v.id];
+      if(old&&old.blocks){ v.blocks=old.blocks; v._loaded=old._loaded; }
+      convs[v.id]=v; knownIds[v.id]=1;
+      if(v.id===selected&&!v._loaded) loadBody(v.id);
+    });
   } else if(d.kind==="removed"){
     delete convs[d.id];
     if(selected===d.id){ selected=null; nodeMap={}; threadConv=null; }
@@ -779,6 +800,9 @@ es.onmessage=function(e){
   renderAll();
 };
 es.onerror=function(){ document.getElementById("h-title").textContent="连接断开，重试中…"; };
+$("list").addEventListener("click",function(e){
+  var row=e.target.closest("[data-id]"); if(row) loadBody(row.getAttribute("data-id"));
+});
 /* Read-only project mirror: an occupied dashboard port may belong to a
    different MCP instance. Preserve this interface without stopping either
    bridge. The mirror cannot send prompts or purge sessions. */
@@ -795,7 +819,9 @@ async function refreshProjectMirror(){
     renderAll();
   }catch(e){/* Native bridge remains usable if the optional mirror is offline. */}
 }
-refreshProjectMirror();setInterval(refreshProjectMirror,2000);
+/* Project mirror is optional and its host (8801) is usually absent. Probing
+   every 2s produced a failed request plus a full renderAll(); probe once. */
+setTimeout(refreshProjectMirror, 300);
 setInterval(function(){
   var k=Object.keys(convs), live=false;
   for(var i=0;i<k.length;i++) if(convs[k[i]].status==="running"){ convs[k[i]].elapsed=(convs[k[i]].elapsed||0)+0.5; live=true; }
