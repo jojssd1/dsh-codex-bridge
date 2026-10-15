@@ -27,3 +27,7 @@ demo_plot.png
 
 # node
 node_modules/
+# forensic copies of files truncated mid-write
+*.truncated-*
+*.broken-*
+*.orig-*

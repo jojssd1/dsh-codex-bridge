@@ -155,6 +155,7 @@
   .caret{color:var(--dim);transition:transform .15s;display:inline-block}
   details[open]>summary .caret{transform:rotate(90deg)}
   .imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .imgs.strip{margin:4px 0 10px 0}
   .imgs a{display:block;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--code-bg);max-width:100%}
   .imgs img{display:block;max-width:100%;max-height:420px;object-fit:contain}
   .imgs a:hover{border-color:var(--accent)}
@@ -214,6 +215,25 @@
   #toolbar button{background:var(--panel2);color:var(--dim);border:1px solid var(--line);border-radius:6px;
                   padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
   #toolbar button:hover{border-color:var(--accent);color:var(--accent)}
+  /* jump-to-bottom: appears only once you have scrolled away from the tail */
+  /* a band = the work between two narrative points, folded into one line */
+  .band>details{margin:2px 0}
+  .band>details>summary{display:flex;align-items:center;gap:9px;cursor:pointer;list-style:none;
+    padding:6px 10px;border:1px dashed var(--line);border-radius:8px;background:var(--surface);
+    font-family:var(--sans);font-size:12px;color:var(--dim)}
+  .band>details>summary::-webkit-details-marker{display:none}
+  .band>details>summary:hover{border-color:var(--accent);color:var(--fg)}
+  .band>details[open]>summary{border-style:solid;border-bottom-left-radius:0;border-bottom-right-radius:0;margin-bottom:0}
+  .band .bbd{padding:2px 0 4px 12px;border-left:2px solid var(--line);margin-left:6px}
+  #jump-bottom{position:fixed;right:18px;bottom:88px;width:34px;height:34px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;z-index:30;padding:0;
+    background:var(--panel2);color:var(--dim);border:1px solid var(--line);
+    box-shadow:var(--sh-2);cursor:pointer;font-size:15px;line-height:1;
+    transition:border-color .12s,color .12s,transform .08s,background .12s}
+  #jump-bottom:hover{border-color:var(--accent);color:var(--accent);background:var(--surface-hover)}
+  #jump-bottom:active{transform:translateY(1px)}
+  /* already at the tail: stay visible, just fade, so it never disappears */
+  #jump-bottom.off{opacity:.35}
   #composer{border-top:1px solid var(--line);background:linear-gradient(180deg,var(--comp-g1),var(--comp-g2));
             padding:11px 14px;display:flex;gap:8px;align-items:flex-end;box-shadow:0 -6px 24px rgba(0,0,0,.28);z-index:2}
   #composer textarea:focus,#composer input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(122,162,247,.12)}
@@ -261,6 +281,7 @@
 <div id="main">
   <div id="head"><div class="t" id="h-title">未选择</div><div class="m" id="h-meta"></div><div id="toolbar"><button id="expandAll">展开全部</button><button id="collapseAll">收起全部</button><button id="theme">浅色</button></div></div>
   <div id="thread"><div class="empty">左侧选一个 subagent 继续聊，或点「+ 新会话」开一个</div></div>
+<button id="jump-bottom" title="回到底部（End）" aria-label="回到底部">↓</button>
   <div id="modal"><div class="box"><h3 id="m-title"></h3><p id="m-body"></p>
     <label id="m-opt"><input type="checkbox" id="m-purge"> 同时删除 DSH 磁盘上的 session（agent 的记忆）</label>
     <div class="row"><button id="m-no">取消</button><button id="m-yes" class="danger">销毁</button></div></div></div>
@@ -334,6 +355,22 @@ function imgHtml(b){
     var u="/api/file?path="+encodeURIComponent(p);
     return '<a href="'+u+'" target="_blank" title="'+esc(p)+'"><img src="'+u+'" alt="'+esc(p)+'" loading="lazy"></a>';
   }).join("")+"</div>";
+}
+/* Images belong beside the action, not buried in its collapsed body: the ledger
+   stays one line per action, but a row that produced pictures shows them at once. */
+function imgStrip(blocks){
+  var seen = {}, out = [];
+  (blocks || []).forEach(function (b) {
+    if (!b || !b.images) return;
+    b.images.forEach(function (p) {
+      if (seen[p]) return;
+      seen[p] = 1;
+      var u = "/api/file?path=" + encodeURIComponent(p);
+      out.push('<a href="' + u + '" target="_blank" title="' + esc(p) + '">'
+             + '<img src="' + u + '" alt="' + esc(p) + '" loading="lazy"></a>');
+    });
+  });
+  return out.length ? '<div class="imgs strip">' + out.join("") + "</div>" : "";
 }
 /* native confirm()/alert() can be blocked in embedded webviews, so use in-page UI */
 var _resolveAsk = null;
@@ -409,10 +446,18 @@ function targetOf(b){
   try { var j = JSON.stringify(i); return j === "{}" ? "" : j; } catch (e) { return ""; }
 }
 function itemSig(b){
+  if (!b) return "";
   // lengths matter: thinking and tool output arrive in chunks, and a count-only
-  // signature would freeze them in the DOM.
+  // signature would freeze them in the DOM. images must be in here too -- a row
+  // rendered before its picture paths were harvested would never be redrawn.
   return (b.kind || "") + ":" + String(b.text || "").length + ":"
-       + String(b.result || "").length + ":" + (b.status || "");
+       + String(b.result || "").length + ":" + (b.status || "") + ":"
+       + (b.images ? b.images.length + "@" + b.images.join(",").length : 0);
+}
+function groupImgsSig(g){
+  var n = 0, l = 0;
+  (g.items || []).forEach(function (x) { var i = x.b && x.b.images; if (i) { n += i.length; l += i.join(",").length; } });
+  return n + "@" + l;
 }
 function lineSummary(b){
   if (b.kind === "think") return '<span class="v dim">思考</span>';
@@ -469,16 +514,54 @@ function buildRows(blocks){
     if (last && last.kind === "group" && last.name === r.b.name) last.items.push(r);
     else rows.push({ kind: "group", name: r.b.name, key: "g" + (r.b.id || j), items: [r] });
   }
-  return rows;
+
+  /* Fold the work between two narrative points into one collapsible band.
+     User messages and final answers stay outside: they are the story, and
+     burying them would make the transcript unreadable. */
+  var out = [], band = [];
+  function flushBand() {
+    if (!band.length) return;
+    if (band.length === 1) { out.push(band[0]); band = []; return; }
+    var tools = 0, think = 0;
+    band.forEach(function (r) { if (r.kind === "group") tools += r.items.length; else think++; });
+    out.push({ kind: "band", key: "b" + (band[0].key || out.length), rows: band,
+               nTools: tools, nThink: think });
+    band = [];
+  }
+  for (var m = 0; m < rows.length; m++) {
+    var rr = rows[m];
+    if (rr.kind === "content" && (rr.b.kind === "final" || rr.b.kind === "user" ||
+                                  rr.b.kind === "error" || rr.b.kind === "msg")) { flushBand(); out.push(rr); }
+    else band.push(rr);
+  }
+  flushBand();
+  return out;
+}
+function bandSummary(band){
+  if (!band || !band.rows) return "";
+  var parts = [];
+  if (band.nTools) parts.push(band.nTools + " 个动作");
+  if (band.nThink) parts.push(band.nThink + " 段思考");
+  var failed = band.rows.some(function (r) { return r.kind === "group" && groupStatus(r) === "failed"; });
+  var running = band.rows.some(function (r) { return r.kind === "group" && groupStatus(r) === "running"; });
+  var ms = 0;
+  band.rows.forEach(function (r) { if (r.kind === "group") ms += groupMs(r); });
+  return '<span class="v dim">' + esc(parts.join(" · ")) + '</span>'
+       + (ms ? '<span class="du">' + dur(ms) + '</span>' : '')
+       + '<span class="ts ' + (failed ? "failed" : running ? "running" : "completed") + '">'
+       + (failed ? "有失败" : running ? "进行中" : "完成") + '</span>';
 }
 function groupStatus(g){
+  if (!g || !g.items) return "running";
   var t = g.items.map(function (x) { return x.b.status || "running"; });
   if (t.some(function (s) { return s === "failed" || s === "error"; })) return "failed";
   if (t.every(function (s) { return s === "completed"; })) return "completed";
   return "running";
 }
 function groupSig(g){
-  return g.items.map(function (x) { return itemSig(x.b) + ":" + x.think.length + ":" + (x.b.ms || 0); }).join("|");
+  if (!g || !g.items) return "";
+  return g.items.map(function (x) { return itemSig(x.b) + ":" + x.think.length + ":" + (x.b.ms || 0); }).join("|")
+       + "|img:" + groupImgsSig(g);
 }
 function dur(ms){
   if (!ms || ms < 0) return "";
@@ -487,6 +570,7 @@ function dur(ms){
   return Math.floor(ms / 60000) + "m" + String(Math.round((ms % 60000) / 1000)).padStart(2, "0") + "s";
 }
 function groupMs(g){
+  if (!g || !g.items) return 0;
   return g.items.reduce(function (a, x) { return a + (x.b.ms || 0); }, 0);
 }
 var UNIT = { pwsh: "条命令", bash: "条命令", read: "个文件", write: "个文件", edit: "个文件",
@@ -495,6 +579,7 @@ var UNIT = { pwsh: "条命令", bash: "条命令", read: "个文件", write: "�
              web_search: "次搜索", web_fetch: "次抓取", str_replace_editor: "次编辑" };
 function unitOf(n){ return UNIT[n] || "项"; }
 function groupSummary(g){
+  if (!g || !g.items || !g.items.length) return '<span class="v dim">（无）</span>';
   var n = g.items.length, st = groupStatus(g), v = verbOf(g.name);
   // A merged row names the KIND and the count; every target is still listed one
   // level down, so nothing is lost.
@@ -505,7 +590,7 @@ function groupSummary(g){
        + '<span class="ts ' + st + '">' + esc(st === "completed" ? "完成" : st) + '</span>';
 }
 function actionBody(x){
-  var h = "", b = x.b;
+  var h = "", b = (x && x.b) || {};
   if (x.think) h += '<div class="thk">' + esc(x.think) + '</div>';
   var inp = "";
   if (b.input && b.input.command) inp = "$ " + b.input.command;
@@ -515,13 +600,32 @@ function actionBody(x){
   if (inp) h += '<div class="lbl">INPUT</div><pre>' + esc(inp) + '</pre>';
   if (out) h += '<div class="lbl">OUTPUT</div><pre>' + esc(shown) + '</pre>';
   if (!inp && !out && !x.think) h += '<div class="lbl">等待中…</div>';
-  return h + imgHtml(b);
+  return h;   // images are rendered by imgStrip() beside the action line
 }
 function groupBody(g){
+  if (!g || !g.items || !g.items.length) return "";
   if (g.items.length === 1) return actionBody(g.items[0]);
   return g.items.map(function (x) {
     return '<div class="mi"><div class="mh">' + esc(targetOf(x.b).slice(0, 140)) + '</div>' + actionBody(x) + '</div>';
   }).join("");
+}
+function bandSig(band){
+  if (!band || !band.rows) return "";
+  return band.rows.map(function (r) {
+    return r.kind === "group" ? groupSig(r) : r.kind === "think" ? "t:" + r.text.length : itemSig(r.b);
+  }).join("~");
+}
+/* Rows inside a band render exactly like top-level rows, minus the outer div. */
+function renderInnerRow(r){
+  if (!r) return "";
+  var k = r.key;
+  if (r.kind === "think") {
+    return '<div class="ln"><details class="line" data-key="' + k + '"><summary><span class="v dim">思考</span></summary>'
+      + '<div class="bd"><div class="thk">' + esc(r.text) + '</div></div></details></div>';
+  }
+  return '<div class="ln"><details class="line ' + groupStatus(r) + '" data-key="' + k + '"><summary>'
+    + groupSummary(r) + '</summary><div class="bd">' + groupBody(r) + '</div></details>'
+    + imgStrip((r.items || []).map(function (x) { return x.b; })) + '</div>';
 }
 function renderThread(){
   var v = selected ? convs[selected] : null;
@@ -529,8 +633,8 @@ function renderThread(){
   if (threadConv !== selected) { thread.innerHTML = ""; nodeMap = {}; threadConv = selected; }
 
   var rows = buildRows(v.blocks || []);
-  var seen = {}, lastAction = null;
-  rows.forEach(function (r) { if (r.kind === "group") lastAction = r.key; });
+  var seen = {}, lastAction = null, lastBandKey = null;
+  rows.forEach(function (r) { if (r.kind === "band") lastBandKey = r.key; });
 
   rows.forEach(function (r) {
     var k = r.key;
@@ -541,11 +645,23 @@ function renderThread(){
 
     var sig = r.kind === "content" ? itemSig(r.b)
             : r.kind === "think" ? "t:" + r.text.length
+            : r.kind === "band" ? "band:" + bandSig(r)
             : groupSig(r);
     if (el.dataset.sig === sig) return;
     el.dataset.sig = sig;
 
     if (r.kind === "content") { el.className = "turn"; el.innerHTML = contentHtml(r.b); return; }
+
+    if (r.kind === "band") {
+      el.className = "band";
+      el.innerHTML = '<details data-key="' + k + '"><summary>' + bandSummary(r) + '</summary>'
+        + '<div class="bbd">' + r.rows.map(renderInnerRow).join("") + '</div></details>';
+      var bd = el.querySelector("details");
+      bd.open = openKeys[k] !== undefined ? openKeys[k]
+              : (v.status === "running" && k === lastBandKey);
+      bd.addEventListener("toggle", function () { openKeys[k] = bd.open; });
+      return;
+    }
 
     el.className = "ln";
     if (r.kind === "think") {
@@ -553,7 +669,8 @@ function renderThread(){
         + '<div class="bd"><div class="thk">' + esc(r.text) + '</div></div></details>';
     } else {
       el.innerHTML = '<details class="line ' + groupStatus(r) + '" data-key="' + k + '"><summary>' + groupSummary(r) + '</summary>'
-        + '<div class="bd">' + groupBody(r) + '</div></details>';
+        + '<div class="bd">' + groupBody(r) + '</div></details>'
+        + imgStrip((r.items || []).map(function (x) { return x.b; }));
     }
     var d = el.querySelector("details");
     d.open = shouldOpen(k, v.status === "running" && k === lastAction);
@@ -570,6 +687,7 @@ function renderThread(){
     tailEl.querySelector(".tx").textContent = "工作中 " + (v.elapsed || 0).toFixed(0) + "s";
   } else if (tailEl && tailEl.parentNode) tailEl.parentNode.removeChild(tailEl);
   if (autoScroll) thread.scrollTop = thread.scrollHeight;
+  syncJump();
 }
 function setAllOpen(v){
   thread.querySelectorAll("details").forEach(function (d) {
@@ -628,7 +746,21 @@ function renderHead(){
 }
 function renderAll(){ renderList(); renderHead(); renderThread(); }
 
-thread.addEventListener("scroll",function(){ autoScroll=(thread.scrollHeight-thread.scrollTop-thread.clientHeight)<50; });
+function atBottom(){ return (thread.scrollHeight-thread.scrollTop-thread.clientHeight)<50; }
+/* Show the button only when there is something to scroll back to. */
+function syncJump(){
+  var jb=document.getElementById("jump-bottom"); if(!jb) return;
+  // Always present; only faded when there is nothing left to scroll to.
+  jb.classList.toggle("off", atBottom());
+}
+var _jb=document.getElementById("jump-bottom");
+if(_jb) _jb.addEventListener("click",function(){ autoScroll=true; thread.scrollTop=thread.scrollHeight; syncJump(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="End" && !/^(INPUT|TEXTAREA)$/.test((document.activeElement||{}).tagName||"")){
+    autoScroll=true; thread.scrollTop=thread.scrollHeight; syncJump();
+  }
+});
+thread.addEventListener("scroll",function(){ autoScroll=atBottom(); syncJump(); });
 
 var es=new EventSource("/api/stream");
 es.onmessage=function(e){

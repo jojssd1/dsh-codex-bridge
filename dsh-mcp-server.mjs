@@ -42,7 +42,10 @@ const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
 /* ------------------------------------------------------------------ runs */
 let seq = 0;
 const runs = new Map();
-const IMG_RE = /[A-Za-z]:\\[^\s"'<>|?*]+\.(?:png|jpe?g|gif|webp|bmp|svg)|[^\s"'<>|?*()\[\]]+\.(?:png|jpe?g|gif|webp|bmp|svg)/gi;
+// Backtick, quotes, braces and friends are NOT path characters: a JSON dump like
+// `"file": "x.png"` used to drag the closing quote (or a template backtick) into
+// the captured path, producing a broken <img> for a file that never existed.
+const IMG_RE = /[A-Za-z]:\\[^\s"'`<>|?*{}()\[\],;:]+?\.(?:png|jpe?g|gif|webp|bmp|svg)|[^\s"'`<>|?*{}()\[\],;:]+?\.(?:png|jpe?g|gif|webp|bmp|svg)/gi;
 const servedImages = new Set(); // only paths that actually appeared in a conversation
 const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
                webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml" };
@@ -58,9 +61,13 @@ function collectImages(...texts) {
     if (t == null) continue;
     const s = typeof t === "string" ? t : JSON.stringify(t);
     for (const m of String(s).matchAll(IMG_RE)) {
-      let p = m[0].replace(/[.,;:)\]]+$/, "");
+      let p = m[0].replace(/[.,;:)\]]+$/, "").replace(/^[\s"'`]+|[\s"'`]+$/g, "");
       if (!p || found.includes(p)) continue;
       const abs = p.match(/^[A-Za-z]:[\\/]/) ? p : join(cwdOfRun, p);
+      // A path that only LOOKS like an image must not become a broken <img>:
+      // DSH prints planned/attempted filenames all the time, and a missing file
+      // renders as a torn icon that reads like a failure.
+      try { if (!statSync(abs).isFile()) continue; } catch { continue; }
       if (!servedImages.has(abs)) servedImages.add(abs);
       found.push(abs);
     }
@@ -401,6 +408,42 @@ const TOOLS = [
 ];
 
 const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], isError });
+
+/**
+ * MCP tool results can carry image blocks, and Codex renders them. DSH's headless
+ * projection flattens pictures into file paths, so read those files back and hand
+ * them over as real images -- otherwise every figure the subagent produced stays
+ * invisible in the orchestrator's own transcript.
+ */
+const IMG_MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+                   gif: "image/gif", webp: "image/webp" };
+const MAX_IMGS = 4;            // per tool result
+const MAX_IMG_BYTES = 700000;  // base64 inflates ~33%; keep the frame reasonable
+function imageBlocks(state) {
+  if (!state) return [];
+  const seen = new Set(), out = [];
+  for (const b of state.blocks || []) {
+    for (const p of b?.images || []) {
+      if (out.length >= MAX_IMGS || seen.has(p)) continue;
+      seen.add(p);
+      const mime = IMG_MIME[(p.split(".").pop() || "").toLowerCase()];
+      if (!mime) continue;                       // svg/bmp stay text-only
+      try {
+        const buf = readFileSync(p);
+        if (!buf.length || buf.length > MAX_IMG_BYTES) continue;
+        out.push({ type: "image", data: buf.toString("base64"), mimeType: mime });
+      } catch {}
+    }
+  }
+  return out;
+}
+function textWithImages(t, state, isError = false) {
+  const imgs = imageBlocks(state);
+  const content = [{ type: "text", text: t }].concat(imgs);
+  if (imgs.length) content.push({ type: "text",
+    text: "(+" + imgs.length + " image(s) attached above)" });
+  return { content, isError };
+}
 const needTask = (a) =>
   typeof a?.task === "string" && a.task.trim() !== "" ? null : text("task must be a non-empty string", true);
 const needRun = (a) => runs.get(a?.run_id) ?? null;
@@ -418,8 +461,8 @@ async function callTool(name, args) {
     if (done.status === "running" && done.detached) {
       return text("DSH run " + done.id + " is still running (not killed). Collect it with dsh_status / dsh_result.");
     }
-    if (done.status !== "done") return text("DSH run " + done.status + " (exit " + done.exitCode + ").\n\n" + (body || "(no output)"), true);
-    return text(body || "(no output)");
+    if (done.status !== "done") return textWithImages("DSH run " + done.status + " (exit " + done.exitCode + ").\n\n" + (body || "(no output)"), done, true);
+    return textWithImages(body || "(no output)", done);
   }
   if (name === "dsh_send") {
     if (typeof args?.message !== "string" || !args.message.trim()) return text("message must be a non-empty string", true);
@@ -439,8 +482,8 @@ async function callTool(name, args) {
         "Collect it later with dsh_status (progress) or dsh_result (final answer), " +
         "or dsh_cancel to stop it.");
     }
-    if (done2.status !== "done") return text(head + "\nDSH turn " + done2.status + " (exit " + done2.exitCode + ").\n\n" + (body || "(no output)"), true);
-    return text(head + "\n" + (body || "(no output)"));
+    if (done2.status !== "done") return textWithImages(head + "\nDSH turn " + done2.status + " (exit " + done2.exitCode + ").\n\n" + (body || "(no output)"), done2, true);
+    return textWithImages(head + "\n" + (body || "(no output)"), done2);
   }
   if (name === "dsh_forget") {
     const purge = args?.purge_session !== false;
@@ -478,8 +521,8 @@ async function callTool(name, args) {
     if (r.status === "running") return text("still running after wait\n" + progressText(r));
     let body = r.finalText ?? "";
     if (r.stderr.trim()) body += (body ? "\n\n" : "") + "[stderr]\n" + r.stderr.trim();
-    if (r.status !== "done") return text("DSH run " + r.status + " (exit " + r.exitCode + ").\n\n" + (body || "(no output)"), true);
-    return text(body || "(no output)");
+    if (r.status !== "done") return textWithImages("DSH run " + r.status + " (exit " + r.exitCode + ").\n\n" + (body || "(no output)"), r, true);
+    return textWithImages(body || "(no output)", r);
   }
   if (name === "dsh_cancel") {
     const r = needRun(args); if (!r) return text("unknown run_id: " + args?.run_id, true);
@@ -753,8 +796,24 @@ function startHttpServer() {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ removed }));
     } else if (url === "/api/conversations") {
+      /* The full list is ~11 MB once the archive grows: serialising every block of
+         every conversation on each poll took ~4.8 s and the browser rendered nothing
+         until it arrived, which looked like an endless spinner. The index now ships
+         metadata only; bodies are fetched per conversation via ?full=1. */
+      const brief = new URL(req.url, "http://x").searchParams.get("full") === "1";
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      res.end(JSON.stringify(snapshot().conversations, null, 1));
+      if (!brief) {
+        const list = snapshot().conversations.map((v) => ({
+          id: v.id, sessionId: v.sessionId, cwd: v.cwd, title: v.title, status: v.status,
+          createdAt: v.createdAt, updatedAt: v.updatedAt, elapsed: v.elapsed, calls: v.calls,
+          nBlocks: (v.blocks || []).length,
+        }));
+        res.end(JSON.stringify(list));
+        return;
+      }
+      const one = new URL(req.url, "http://x").searchParams.get("id");
+      const all = snapshot().conversations;
+      res.end(JSON.stringify(one ? all.filter((v) => v.id === one) : all));
     } else if (url === "/api/send" && req.method === "POST") {
       const body = await readBody(req);
       if (!body.message) { res.writeHead(400, { "content-type": "application/json" }); res.end('{"error":"message required"}'); return; }

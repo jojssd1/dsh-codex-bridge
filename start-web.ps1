@@ -1,0 +1,1 @@
+& 'C:\Users\Admin01\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd' --patch 'C:\Users\Admin01\.local\share\codex-deepseek-worker\dsh-worker.patch.yml' web --no-open --host 127.0.0.1 --port 3080
