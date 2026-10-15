@@ -31,3 +31,9 @@ node_modules/
 *.truncated-*
 *.broken-*
 *.orig-*
+
+# pre-change snapshots taken while fixing live bugs
+*.prev-*
+*.before-*
+*.truncated-*
+*.broken-*
