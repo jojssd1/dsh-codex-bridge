@@ -37,3 +37,7 @@ node_modules/
 *.before-*
 *.truncated-*
 *.broken-*
+# scratch files used while probing the bridge
+_*.mjs
+_*.ps1
+_*.log

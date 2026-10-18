@@ -10,7 +10,7 @@
  *
  * stdout is the protocol channel only; diagnostics go to stderr.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, mkdirSync, readdirSync, readFileSync, existsSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
@@ -24,6 +24,7 @@ const INSTALL =
 const EXE = join(INSTALL, "DeepSeek Harness.exe");
 const CLI = join(INSTALL, "resources", "app.asar", "dsh", "node_modules", "@deepseek-ai", "dsh-desktop-host", "lib", "cli.js");
 const RUNS_DIR = join(homedir(), ".dsh-codex-bridge", "runs");
+const PROJCACHE_DIR = join(homedir(), ".dsh", "storages", "session_projcache", "sessions");
 const BRIDGE_DIR = join(homedir(), ".dsh-codex-bridge");
 const HUB_STATE = join(BRIDGE_DIR, "hub.json");
 /* Codex spawns one MCP server per conversation, but only one process can own the
@@ -34,6 +35,41 @@ const INSTANCE_ID = "inst-" + Math.random().toString(36).slice(2, 8);
 const instances = new Map();          // instanceId -> lastSeen (hub side)
 let forwarding = false;               // MCP side: am I forwarding to a hub?
 const DEFAULT_TIMEOUT_MS = Number(process.env.DSH_MCP_TIMEOUT_MS ?? 1800000);
+
+/**
+ * Codex launches this server with an explicit env block, so only the variables
+ * listed under [mcp_servers.dsh.env] reach us -- the machine's user-level
+ * environment is NOT inherited. DSH's headless profile resolves the provider key
+ * from OPENCODE_GO_API_KEY, so without this the delegated run dies instantly with
+ * MISSING_CREDENTIAL and the caller only sees an empty turn.
+ *
+ * Values are read from the user-level environment (set them once with
+ * setx, or via the DSH Models page) and merged in. Nothing is written to disk
+ * here, so no secret ends up in a config file.
+ */
+const CREDENTIAL_ENV = ["OPENCODE_GO_API_KEY", "DEEPSEEK_API_KEY", "ARK_API_KEY",
+                        "HETU_API_KEY", "CATBEE_API_KEY"];
+function healEnv() {
+  const missing = CREDENTIAL_ENV.filter((k) => !process.env[k]);
+  if (!missing.length) return [];
+  const healed = [];
+  if (process.platform === "win32") {
+    // read the persistent user environment without spawning a shell
+    try {
+      for (const k of missing) {
+        try {
+          const v = spawnSync("powershell",
+            ["-NoProfile", "-NonInteractive", "-Command",
+             "[Environment]::GetEnvironmentVariable('" + k + "','User')"],
+            { encoding: "utf8", timeout: 8000, windowsHide: true }).stdout?.trim();
+          if (v) { process.env[k] = v; healed.push(k); }
+        } catch {}
+      }
+    } catch {}
+  }
+  return healed;
+}
+const HEALED = healEnv();
 const MAX_EVENTS = 400;
 
 const log = (...a) => process.stderr.write("[dsh-mcp] " + a.join(" ") + "\n");
@@ -120,6 +156,53 @@ function userBlock(text) {
   return { kind: "user", id: "u" + Math.random().toString(36).slice(2, 9), text: String(text) };
 }
 /** Frozen history of earlier turns + the in-flight turn, newest last. */
+/**
+ * DSH already tracks context pressure per session and exposes it in the session
+ * projection cache. Reading it gives the orchestrator the same picture the desktop
+ * app shows: how much of the window is consumed and what consumes it, split into
+ * system / tool-definitions / messages.
+ *
+ *   contextPressure  {surfaceTokens, contextWindow, pressureTokens}
+ *   contextBreakdown {breakdown:{systemTokens, toolsTokens, messageTokens}}
+ *   tokenUsage       {totals:{...}, last:{turn,step,buckets}}
+ *
+ * The file is a small JSON projection updated as the session runs, so it is cheap
+ * to stat and re-read; results are cached for a second to survive 1 Hz polling.
+ */
+const _ctxCache = new Map();   // sessionId -> {at, data}
+function readContext(sessionId) {
+  if (!sessionId) return null;
+  const hit = _ctxCache.get(sessionId);
+  const now = Date.now();
+  if (hit && now - hit.at < 1000) return hit.data;
+  let data = null;
+  try {
+    const p = join(PROJCACHE_DIR, sessionId + ".json");
+    const st = statSync(p);
+    if (hit && hit.mtimeMs === st.mtimeMs) { hit.at = now; return hit.data; }
+    const rows = JSON.parse(readFileSync(p, "utf8"))?.record?.rows ?? {};
+    const pressure = rows.contextPressure?.val ?? null;
+    const bd = rows.contextBreakdown?.val?.breakdown ?? null;
+    const usage = rows.tokenUsage?.val ?? null;
+    if (pressure || bd || usage) {
+      data = {
+        surface: pressure?.surfaceTokens ?? bd?.messageTokens ?? null,
+        window: pressure?.contextWindow ?? null,
+        pressure: pressure?.pressureTokens ?? null,
+        system: bd?.systemTokens ?? null,
+        tools: bd?.toolsTokens ?? null,
+        messages: bd?.messageTokens ?? null,
+        totals: usage?.totals ?? null,
+        last: usage?.last ?? null,
+      };
+    }
+    _ctxCache.set(sessionId, { at: now, data, mtimeMs: st.mtimeMs });
+  } catch (e) {
+    _ctxCache.set(sessionId, { at: now, data: null, mtimeMs: 0 });
+  }
+  return data;
+}
+
 function conversationView(conv) {
   let blocks = conv.baseBlocks.slice();
   if (conv.run) blocks = blocks.concat([conv.run.userBlock], conv.run.blocks);
@@ -131,6 +214,7 @@ function conversationView(conv) {
     createdAt: conv.createdAt, updatedAt: conv.updatedAt,
     elapsed: conv.run ? ((conv.run.endedAt ?? Date.now()) - conv.run.startedAt) / 1000 : 0,
     calls: blocks.filter((b) => b.kind === "tool").length,
+    context: readContext(conv.id),
     blocks,
   };
 }
@@ -139,6 +223,7 @@ function conversationView(conv) {
 function conversationBrief(conv) {
   const v = conversationView(conv);
   delete v.blocks;
+  // context is kept: it is a handful of numbers and drives the per-row meter
   v.nBlocks = (conv.baseBlocks.length + (conv.run ? conv.run.blocks.length + 1 : 0));
   return v;
 }
@@ -187,7 +272,50 @@ async function waitWhileBusy(sessionId, waitMs) {
   return still && still.status === "running" ? still : null;
 }
 
-function startRun({ task, cwd, session_id, timeout_ms, userMessage }) {
+const REASONING_LEVELS = ["off", "low", "medium", "high", "max"];
+/** Write a one-line overlay selecting the requested effort. Cached per level. */
+const _patchCache = new Map();
+function reasoningPatch(level) {
+  if (!level) return null;
+  const lv = String(level).toLowerCase();
+  if (!REASONING_LEVELS.includes(lv)) return null;
+  if (_patchCache.has(lv)) return _patchCache.get(lv);
+  try {
+    mkdirSync(BRIDGE_DIR, { recursive: true });
+    const p = join(BRIDGE_DIR, "reasoning-" + lv + ".yml");
+    // A patch REPLACES the entry's config rather than merging into it, so the
+    // provider and model have to be restated or startup fails validation with
+    // "$.provider missing required value".
+    writeFileSync(p, [
+      "- id: agent-default-model",
+      '  name: "@deepseek-ai/dsh-agent-default-model"',
+      "  config:",
+      "    provider: opencode-go",
+      "    model: deepseek-v4.1-flash",
+      '    reasoningEffort: "' + lv + '"',
+      "",
+    ].join("\n"), "utf8");
+    _patchCache.set(lv, p);
+    return p;
+  } catch (e) { log("reasoning patch failed: " + e.message); return null; }
+}
+
+/**
+ * The execution contract. A skill on disk is only *available* -- whether a
+ * subagent loads it is its own decision, and measurement showed it did so in
+ * only 2 of 70 recent runs, while 20% still burned 10-20 minutes in a single
+ * blocking job_output {wait:true}. Prepending this marker makes loading the
+ * contract part of the task rather than an option.
+ *
+ * It is prepended to the WIRE task only: userMessage (which titles the dashboard
+ * conversation and is written to the log) stays clean.
+ */
+const CONTRACT_ENABLED = process.env.DSH_CONTRACT !== "0";
+const CONTRACT = "[执行契约] 本任务由 Codex 经 DSH 桥派发。动手前先调用 skill 工具加载 "
+  + "`dsh-execution-contract` 并严格遵守其四模式、白名单与返回格式；"
+  + "缺少 cwd / 输出目录 / runner 时只报告缺失项，不得自行扫描目录寻找答案。\n\n";
+
+function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, contract }) {
   // A resume must land in the session's own directory, not the bridge's.
   const resumeCwd = session_id ? cwdForSession(session_id) : null;
   if (resumeCwd && !cwd) cwd = resumeCwd;
@@ -199,9 +327,16 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage }) {
   mkdirSync(RUNS_DIR, { recursive: true });
   const logPath = join(RUNS_DIR, id + ".jsonl");
 
-  const args = ["--expose-internals", CLI, "--profile", "headless", "--json"];
+  const args = ["--expose-internals", CLI, "--profile", "headless"];
+  // Reasoning level is per-run, not a profile edit: `--patch` overlays one more
+  // entry on top of the profile tree, so a trivial task can drop to "off" without
+  // anyone touching a file on disk between calls.
+  // --patch must come BEFORE --json: everything after --json is the task text.
+  const patchPath = reasoningPatch(reasoning);
+  if (patchPath) args.push("--patch", patchPath);
+  args.push("--json");
   if (session_id) args.push("--session-id", String(session_id));
-  args.push(task);
+  args.push(contract === false || !CONTRACT_ENABLED ? task : CONTRACT + task);
 
   const child = spawn(EXE, args, {
     cwd: cwd || process.cwd(),
@@ -286,9 +421,14 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage }) {
       const line = buf.slice(0, i).trim();
       buf = buf.slice(i + 1);
       if (!line) continue;
-      stream.write(line + "\n");
+      // Stamp each event as it is written. The log carried no time at all, so a
+      // replayed conversation could not recover real tool durations: after a hub
+      // restart every measurement read zero, and long blocking waits were
+      // invisible. With ts present, replay reconstructs true timings.
       let ev;
-      try { ev = JSON.parse(line); } catch { continue; }
+      try { ev = JSON.parse(line); } catch { stream.write(line + "\n"); continue; }
+      if (typeof ev.ts !== "number") ev.ts = Date.now();
+      stream.write(JSON.stringify(ev) + "\n");
       if (ev.type === "session" && ev.sessionId) {
         state.sessionId = ev.sessionId;
         sessionCwd.set(ev.sessionId, state.cwd);
@@ -377,13 +517,21 @@ const TOOLS = [
     description: "Delegate one task to a DeepSeek Harness agent and wait for the final answer. Progress streams as MCP progress/log notifications. For long tasks prefer dsh_start + dsh_status so you can report progress before the run ends.",
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
-      session_id: { type: "string" }, timeout_ms: { type: "integer" } },
+      session_id: { type: "string" }, timeout_ms: { type: "integer" },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      contract: { type: "boolean",
+                  description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["task"], additionalProperties: false } },
   { name: "dsh_send",
     description: "Send a message to a DSH subagent and wait for its reply. Omit conversation_id to start a new subagent; pass the conversation_id from a previous call to continue THAT subagent with its full context.",
     inputSchema: { type: "object", properties: {
       message: { type: "string" }, conversation_id: { type: "string" },
-      cwd: { type: "string" }, timeout_ms: { type: "integer" } },
+      cwd: { type: "string" }, timeout_ms: { type: "integer" },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      contract: { type: "boolean",
+                  description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["message"], additionalProperties: false } },
   { name: "dsh_forget",
     description: "Destroy DSH subagent conversations so they stop accumulating. Pass conversation_id for one (deletes its logs and its persisted DSH session unless purge_session:false), or all:true to clear every conversation from the list and delete their logs. For safety all:true does NOT touch persisted DSH sessions unless you also pass purge_sessions:true.",
@@ -397,7 +545,11 @@ const TOOLS = [
     description: "Start a DSH run in the background and return immediately with a run_id.",
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
-      session_id: { type: "string" }, timeout_ms: { type: "integer" } },
+      session_id: { type: "string" }, timeout_ms: { type: "integer" },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      contract: { type: "boolean",
+                  description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["task"], additionalProperties: false } },
   { name: "dsh_status",
     description: "Report live progress of a DSH run: status, elapsed, tool calls, recent events, log path. Set wait_ms to block briefly for the next change.",
@@ -477,7 +629,8 @@ async function callTool(name, args) {
     const busy = await guardSession(args.conversation_id, 120000);
     if (busy) return busy;
     const s = startRun({ task: args.message, userMessage: args.message,
-                         session_id: args.conversation_id, cwd: args.cwd, timeout_ms: args.timeout_ms });
+                         session_id: args.conversation_id, cwd: args.cwd, timeout_ms: args.timeout_ms,
+                         reasoning: args.reasoning, contract: args.contract });
     const done2 = await waitFor(s, Infinity);
     const id = done2.sessionId ?? args.conversation_id ?? "(unknown)";
     let body = done2.finalText ?? "";
@@ -651,14 +804,14 @@ function updateBlocks(s, ev) {
     else b.push({ kind: "think", id: "k" + s.blocks.length, text: ev.text });
   } else if (ev.type === "tool_call") {
     b.push({ kind: "tool", id: ev.callId, callId: ev.callId, name: ev.tool, input: ev.input, status: "running",
-             t0: Date.now(), images: collectImages(ev.input) });
+             t0: typeof ev.ts === "number" ? ev.ts : Date.now(), images: collectImages(ev.input) });
   } else if (ev.type === "tool_result") {
     const t = [...b].reverse().find((x) => x.kind === "tool" && x.callId === ev.callId);
     if (t) {
       t.status = ev.status; t.result = ev.result; t.images = collectImages(ev.result);
       // the DSH event stream carries no timestamps, so timing is measured here,
       // at the moment each half of the call is folded
-      t.t1 = Date.now();
+      t.t1 = typeof ev.ts === "number" ? ev.ts : Date.now();
       t.ms = t.t0 ? Math.max(0, t.t1 - t.t0) : 0;
     }
     else b.push({ kind: "tool", id: ev.callId, callId: ev.callId, name: "tool", status: ev.status, result: ev.result });
@@ -736,9 +889,20 @@ function snapshot() {
    per tick, i.e. 42 GB/hour pushed into the browser, which spent all its time
    parsing and never finished a paint. Only metadata goes out on the timer now;
    a conversation's body is sent when it actually changes. */
+function summarizeRunBrief(s) {
+  // Build an explicit metadata projection: neither blocks nor recent text belong
+  // in a timer-driven message. A text event may itself contain megabytes.
+  return {
+    id: s.id, status: s.status, task: String(s.task).slice(0, 200), cwd: s.cwd,
+    sessionId: s.sessionId ?? "(pending)",
+    elapsed: ((s.endedAt ?? Date.now()) - s.startedAt) / 1000,
+    calls: s.events.filter((e) => e.type === "tool_call").length,
+    nBlocks: s.blocks.length, logPath: s.logPath,
+  };
+}
 function snapshotBrief() {
   return {
-    runs: [...runs.values()].map(summarizeRun),
+    runs: [...runs.values()].map(summarizeRunBrief),
     conversations: [...conversations.values()].map((c) => conversationBrief(c)),
   };
 }
@@ -822,17 +986,14 @@ function startHttpServer() {
       const brief = new URL(req.url, "http://x").searchParams.get("full") === "1";
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       if (!brief) {
-        const list = snapshot().conversations.map((v) => ({
-          id: v.id, sessionId: v.sessionId, cwd: v.cwd, title: v.title, status: v.status,
-          createdAt: v.createdAt, updatedAt: v.updatedAt, elapsed: v.elapsed, calls: v.calls,
-          nBlocks: (v.blocks || []).length,
-        }));
+        const list = [...conversations.values()].map(conversationBrief);
         res.end(JSON.stringify(list));
         return;
       }
       const one = new URL(req.url, "http://x").searchParams.get("id");
-      const all = snapshot().conversations;
-      res.end(JSON.stringify(one ? all.filter((v) => v.id === one) : all));
+      const selected = one ? (conversations.has(one) ? [conversations.get(one)] : [])
+                           : [...conversations.values()];
+      res.end(JSON.stringify(selected.map(conversationView)));
     } else if (url === "/api/send" && req.method === "POST") {
       const body = await readBody(req);
       if (!body.message) { res.writeHead(400, { "content-type": "application/json" }); res.end('{"error":"message required"}'); return; }

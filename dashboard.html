@@ -89,7 +89,20 @@
         background:linear-gradient(180deg,var(--head-g1),var(--head-g2));display:flex;align-items:center;gap:12px;flex-wrap:wrap;
         box-shadow:var(--sh-1);z-index:2}
   #head .t{font-weight:600;display:flex;align-items:center;gap:8px}
-  #head .m{color:var(--dim);font-size:11.5px;display:flex;gap:14px;flex-wrap:wrap}
+  #head .m{color:var(--dim);font-size:11.5px;display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  /* context ring: thin SVG ring with the percentage inside, plus a caption. */
+  #h-ctx{margin-top:2px}
+  .ctxring{display:flex;align-items:center;gap:10px}
+  .ctxring svg{display:block;flex:0 0 auto}
+  .ctxring .trk{stroke:var(--panel2)}
+  .ctxring .arc{stroke:var(--accent);transition:stroke-dashoffset .3s ease}
+  .ctxring.warn .arc{stroke:var(--run)}
+  .ctxring.hot .arc{stroke:var(--bad)}
+  .ctxring text{fill:var(--dim);font-size:9px;font-weight:600;font-family:var(--sans)}
+  .ctxring.warn text,.ctxring.hot text{fill:var(--fg)}
+  .ctxcap{display:flex;flex-direction:column;gap:1px;font-size:11px;color:var(--dim);line-height:1.45}
+  .ctxcap b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+  .ctxcap .sub{font-variant-numeric:tabular-nums}
   #head code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:11px;color:var(--dim)}
   .live{display:inline-flex;align-items:center;gap:6px;color:var(--run);font-size:11.5px}
   .live .b{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1s infinite}
@@ -279,7 +292,7 @@
   <div id="list"><div class="empty">连接中…</div></div>
 </div>
 <div id="main">
-  <div id="head"><div class="t" id="h-title">未选择</div><div class="m" id="h-meta"></div><div id="toolbar"><button id="expandAll">展开全部</button><button id="collapseAll">收起全部</button><button id="theme">浅色</button></div></div>
+  <div id="head"><div class="t" id="h-title">未选择</div><div class="m" id="h-meta"></div><div class="m" id="h-ctx"></div><div id="toolbar"><button id="expandAll">展开全部</button><button id="collapseAll">收起全部</button><button id="theme">浅色</button></div></div>
   <div id="thread"><div class="empty">左侧选一个 subagent 继续聊，或点「+ 新会话」开一个</div></div>
 <button id="jump-bottom" title="回到底部（End）" aria-label="回到底部">↓</button>
   <div id="modal"><div class="box"><h3 id="m-title"></h3><p id="m-body"></p>
@@ -729,6 +742,43 @@ function renderList(){
     };
   });
 }
+/* Context ring. DSH tracks pressure per session and the bridge surfaces it as
+   {surface, window, system, tools, messages}. A ring reads at a glance; the
+   caption underneath says where the window actually went. */
+function fmtTok(n){
+  if(n==null) return "?";
+  if(n<1000) return String(n);
+  if(n<1000000) return (n/1000).toFixed(n<10000?1:0)+"k";
+  return (n/1000000).toFixed(2)+"M";
+}
+var CTX_R=15.5, CTX_C=2*Math.PI*CTX_R;
+function renderContext(v){
+  var el=document.getElementById("h-ctx"); if(!el) return;
+  var c=v&&v.context;
+  if(!c||!c.window){ el.innerHTML=""; return; }
+  var sys=c.system||0, tools=c.tools||0, msg=c.messages||0;
+  var used=sys+tools+msg, win=c.window;
+  var frac=Math.min(1, used/win), pct=frac*100;
+  var cls=pct>=70?" hot":pct>=40?" warn":"";
+  var off=CTX_C*(1-frac);
+  var label=pct>=1?pct.toFixed(0)+"%":pct.toFixed(2)+"%";
+  el.innerHTML=
+    "<div class=\"ctxring"+cls+"\" title=\"系统 "+sys+" / 工具定义 "+tools+" / 对话 "+msg+" tokens\">"
+    + "<svg width=\"38\" height=\"38\" viewBox=\"0 0 38 38\">"
+    +   "<circle class=\"trk\" cx=\"19\" cy=\"19\" r=\""+CTX_R+"\" fill=\"none\" stroke-width=\"3\"></circle>"
+    +   "<circle class=\"arc\" cx=\"19\" cy=\"19\" r=\""+CTX_R+"\" fill=\"none\" stroke-width=\"3\""
+    +     " stroke-linecap=\"round\" stroke-dasharray=\""+CTX_C.toFixed(1)+"\""
+    +     " stroke-dashoffset=\""+off.toFixed(1)+"\""
+    +     " transform=\"rotate(-90 19 19)\"></circle>"
+    +   "<text x=\"19\" y=\"22\" text-anchor=\"middle\">"+label+"</text>"
+    + "</svg>"
+    + "<div class=\"ctxcap\">"
+    +   "<span>上下文 <b>"+fmtTok(used)+"</b> / "+fmtTok(win)+"</span>"
+    +   "<span class=\"sub\">系统 "+fmtTok(sys)+" · 工具 "+fmtTok(tools)+" · 对话 "+fmtTok(msg)+"</span>"
+    +   (c.totals?"<span class=\"sub\">累计缓存读 "+fmtTok(c.totals.cacheReadTokens)+"</span>":"")
+    + "</div>"
+    + "</div>";
+}
 function renderHead(){
   var v=selected?convs[selected]:null, t=document.getElementById("h-title"), m=document.getElementById("h-meta");
   var mirror=!!(v&&v._mirror);
@@ -743,6 +793,7 @@ function renderHead(){
         : '<span class="pill '+(v.status==="done"?"ok":v.status==="interrupted"?"warn":"bad")+'">'
         +esc(v.status==="interrupted"?"已中断":v.status)+"</span>");
   m.innerHTML="<span>"+(v.calls||0)+" 次工具调用</span><span>"+(mirror?esc(v._mirror_note||"当前项目真实桥日志，只读镜像"):"上下文已保留（同一 session）")+"</span>";
+  renderContext(v);
 }
 function renderAll(){ renderList(); renderHead(); renderThread(); }
 
@@ -800,7 +851,7 @@ es.onmessage=function(e){
   renderAll();
 };
 es.onerror=function(){ document.getElementById("h-title").textContent="连接断开，重试中…"; };
-$("list").addEventListener("click",function(e){
+document.getElementById("list").addEventListener("click",function(e){
   var row=e.target.closest("[data-id]"); if(row) loadBody(row.getAttribute("data-id"));
 });
 /* Read-only project mirror: an occupied dashboard port may belong to a
