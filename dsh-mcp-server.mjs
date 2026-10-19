@@ -315,6 +315,53 @@ const CONTRACT = "[执行契约] 本任务由 Codex 经 DSH 桥派发。动手�
   + "`dsh-execution-contract` 并严格遵守其四模式、白名单与返回格式；"
   + "缺少 cwd / 输出目录 / runner 时只报告缺失项，不得自行扫描目录寻找答案。\n\n";
 
+/**
+ * Windows reports a bad working directory as ENOENT *naming the executable*, so a
+ * path that lost its backslashes looks exactly like a missing install -- and that
+ * misdirection costs real time. Check both before spawning and say which is wrong.
+ */
+function preflightRun(dir) {
+  if (!existsSync(EXE)) return "executable not found: " + EXE;
+  if (!existsSync(dir)) {
+    // C:UsersAdmin01Desktop... is the signature of a Windows path that went
+    // through a shell which consumed the separators.
+    const stripped = /^[A-Za-z]:[^\\/]/.test(dir);
+    return "cwd does not exist: " + JSON.stringify(dir)
+      + (stripped
+        ? "\n  Every separator is missing from that path. A Windows path most likely"
+          + " passed through a shell that ate the backslashes -- send it JSON-escaped"
+          + " (\\\\) or use forward slashes (/)."
+        : "");
+  }
+  return null;
+}
+
+/** A run that dies before spawning still gets an id, a log, and a readable reason. */
+function blockedRun({ task, cwd, why, userMessage }) {
+  const id = "run-" + (++seq) + "-" + Date.now().toString(36);
+  mkdirSync(RUNS_DIR, { recursive: true });
+  const logPath = join(RUNS_DIR, id + ".jsonl");
+  const now = Date.now();
+  try {
+    writeFileSync(logPath, [
+      JSON.stringify({ type: "bridge_meta", task: String(userMessage ?? task), cwd, startedAt: now, ts: now }),
+      JSON.stringify({ type: "bridge_stderr", text: why + "\n", ts: now }),
+      JSON.stringify({ type: "bridge_exit", code: -1, signal: null, timedOut: false,
+                       detached: false, killed: false, stderrBytes: why.length, ts: now }),
+      "",
+    ].join("\n"), "utf8");
+  } catch (e) { log("blockedRun: " + e.message); }
+  const state = {
+    id, task, userBlock: null, conv: null, cwd, logPath, child: null,
+    startedAt: now, endedAt: now, events: [], blocks: [], finalText: null,
+    exitCode: -1, status: "failed", stderr: why, timedOut: false, detached: false,
+    killed: false, sessionId: null, listeners: [], lastTextAt: 0,
+  };
+  runs.set(id, state);
+  log("run " + id + " blocked: " + why.split("\n")[0]);
+  return state;
+}
+
 function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, contract }) {
   // A resume must land in the session's own directory, not the bridge's.
   const resumeCwd = session_id ? cwdForSession(session_id) : null;
@@ -323,6 +370,9 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, c
     log("run: cwd override " + cwd + " -> " + resumeCwd + " (session was recorded there)");
     cwd = resumeCwd;
   }
+  const bad = preflightRun(cwd || process.cwd());
+  if (bad) return blockedRun({ task, cwd: cwd || process.cwd(), why: bad, userMessage });
+
   const id = "run-" + (++seq) + "-" + Date.now().toString(36);
   mkdirSync(RUNS_DIR, { recursive: true });
   const logPath = join(RUNS_DIR, id + ".jsonl");
