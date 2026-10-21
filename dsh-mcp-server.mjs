@@ -272,7 +272,10 @@ async function waitWhileBusy(sessionId, waitMs) {
   return still && still.status === "running" ? still : null;
 }
 
-const REASONING_LEVELS = ["off", "low", "medium", "high", "max"];
+// The opencode-go models declare reasoningEfforts off/high/max only. A level the
+// route does not declare fails the whole run with UNSUPPORTED_REASONING_EFFORT, so
+// the accepted set is the declared set -- not the set that sounds reasonable.
+const REASONING_LEVELS = ["off", "high", "max"];
 /** Write a one-line overlay selecting the requested effort. Cached per level. */
 const _patchCache = new Map();
 function reasoningPatch(level) {
@@ -382,6 +385,12 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, c
   // entry on top of the profile tree, so a trivial task can drop to "off" without
   // anyone touching a file on disk between calls.
   // --patch must come BEFORE --json: everything after --json is the task text.
+  if (reasoning !== undefined && reasoning !== null && !REASONING_LEVELS.includes(String(reasoning).toLowerCase())) {
+    return blockedRun({ task, cwd: cwd || process.cwd(), userMessage,
+      why: "unsupported reasoning level: " + JSON.stringify(reasoning)
+        + "\n  This route declares only: " + REASONING_LEVELS.join(", ")
+        + ". A level it does not declare fails the run at the provider, not here." });
+  }
   const patchPath = reasoningPatch(reasoning);
   if (patchPath) args.push("--patch", patchPath);
   args.push("--json");
@@ -568,7 +577,7 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
       session_id: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+      reasoning: { type: "string", enum: ["off", "high", "max"],
                    description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
@@ -578,7 +587,7 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       message: { type: "string" }, conversation_id: { type: "string" },
       cwd: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+      reasoning: { type: "string", enum: ["off", "high", "max"],
                    description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
@@ -596,7 +605,7 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
       session_id: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+      reasoning: { type: "string", enum: ["off", "high", "max"],
                    description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
