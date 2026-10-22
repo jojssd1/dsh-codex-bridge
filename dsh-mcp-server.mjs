@@ -320,6 +320,19 @@ async function waitWhileBusy(sessionId, waitMs) {
 // route does not declare fails the whole run with UNSUPPORTED_REASONING_EFFORT, so
 // the accepted set is the declared set -- not the set that sounds reasonable.
 const REASONING_LEVELS = ["off", "high", "max"];
+/** Full ordering the protocol can express, used to snap an undeclared level. */
+const REASONING_ORDER = ["off", "low", "medium", "high", "max"];
+function nearestReasoning(level) {
+  if (REASONING_LEVELS.includes(level)) return level;
+  const want = REASONING_ORDER.indexOf(level);
+  if (want < 0) return "off";
+  let best = REASONING_LEVELS[0], bestD = Infinity;
+  for (const cand of REASONING_LEVELS) {
+    const d = Math.abs(REASONING_ORDER.indexOf(cand) - want);
+    if (d < bestD) { bestD = d; best = cand; }
+  }
+  return best;
+}
 /** Write a one-line overlay selecting the requested effort. Cached per level. */
 const _patchCache = new Map();
 function reasoningPatch(level) {
@@ -429,13 +442,16 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, c
   // entry on top of the profile tree, so a trivial task can drop to "off" without
   // anyone touching a file on disk between calls.
   // --patch must come BEFORE --json: everything after --json is the task text.
-  if (reasoning !== undefined && reasoning !== null && !REASONING_LEVELS.includes(String(reasoning).toLowerCase())) {
-    return blockedRun({ task, cwd: cwd || process.cwd(), userMessage,
-      why: "unsupported reasoning level: " + JSON.stringify(reasoning)
-        + "\n  This route declares only: " + REASONING_LEVELS.join(", ")
-        + ". A level it does not declare fails the run at the provider, not here." });
+  // Asking for a level the route does not declare used to kill the run at the
+  // provider, after the session had already started. Rejecting it locally would
+  // still fail the task; mapping it to the nearest declared level keeps the task
+  // alive and is visible in the log.
+  const wantedLevel = reasoning === undefined || reasoning === null ? null : String(reasoning).toLowerCase();
+  const effectiveLevel = wantedLevel === null ? null : nearestReasoning(wantedLevel);
+  if (wantedLevel !== null && effectiveLevel !== wantedLevel) {
+    log("run: reasoning " + wantedLevel + " not declared by this route; using " + effectiveLevel);
   }
-  const patchPath = reasoningPatch(reasoning);
+  const patchPath = reasoningPatch(effectiveLevel);
   if (patchPath) args.push("--patch", patchPath);
   args.push("--json");
   if (session_id) args.push("--session-id", String(session_id));
@@ -621,8 +637,8 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
       session_id: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "high", "max"],
-                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work. A level this model does not declare is mapped to the nearest one it does." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["task"], additionalProperties: false } },
@@ -631,8 +647,8 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       message: { type: "string" }, conversation_id: { type: "string" },
       cwd: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "high", "max"],
-                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work. A level this model does not declare is mapped to the nearest one it does." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["message"], additionalProperties: false } },
@@ -649,8 +665,8 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {
       task: { type: "string" }, cwd: { type: "string" },
       session_id: { type: "string" }, timeout_ms: { type: "integer" },
-      reasoning: { type: "string", enum: ["off", "high", "max"],
-                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work." },
+      reasoning: { type: "string", enum: ["off", "low", "medium", "high", "max"],
+                   description: "Override this run only. Default comes from the profile; use 'off' for trivial mechanical work. A level this model does not declare is mapped to the nearest one it does." },
       contract: { type: "boolean",
                   description: "Default true: prepend the execution contract so the subagent loads dsh-execution-contract. Set false only for exploratory work." } },
       required: ["task"], additionalProperties: false } },
