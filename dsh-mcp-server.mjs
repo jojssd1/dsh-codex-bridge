@@ -54,7 +54,25 @@ function healEnv() {
   if (!missing.length) return [];
   const healed = [];
   if (process.platform === "win32") {
-    // read the persistent user environment without spawning a shell
+    // ONE registry read, not one PowerShell process per key. Each PowerShell start
+    // costs ~100ms and four credentials are typically absent from an MCP server's
+    // environment, so the old loop burned ~400ms of every startup -- on top of
+    // rehydration, which competes for exactly the same window.
+    try {
+      const out = spawnSync("reg", ["query", "HKCU\\Environment"],
+        { encoding: "utf8", timeout: 8000, windowsHide: true }).stdout ?? "";
+      const vals = new Map();
+      for (const line of out.split(/\r?\n/)) {
+        const m = line.match(/^\s{4}(\S+)\s+REG_(?:SZ|EXPAND_SZ)\s+(.*)$/);
+        if (m) vals.set(m[1], m[2].trim());
+      }
+      for (const k of missing) {
+        const v = vals.get(k);
+        if (v) { process.env[k] = v; healed.push(k); }
+      }
+      if (healed.length) return healed;
+    } catch {}
+    // Fallback only when the registry read produced nothing usable.
     try {
       for (const k of missing) {
         try {
@@ -91,11 +109,19 @@ const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "im
  * never arrive as data. What does survive is the FILE PATH the agent wrote or
  * read, so harvest those and serve them back over the dashboard.
  */
+// A cheap boolean test run before the path regex. Rehydration walks tens of
+// thousands of tool inputs and results, and the overwhelming majority contain no
+// image at all; scanning each megabyte string with the path regex (and stat-ing
+// every match) cost 3.5s of startup on a 38MB log directory.
+const IMG_HINT = /\.(?:png|jpe?g|gif|webp|bmp|svg)\b/i;
+/** False on MCP-only processes: Codex never renders images, but the dashboard does. */
+let REPLAY_IMAGES = true;
 function collectImages(...texts) {
   const found = [];
   for (const t of texts) {
     if (t == null) continue;
     const s = typeof t === "string" ? t : JSON.stringify(t);
+    if (!IMG_HINT.test(s)) continue;
     for (const m of String(s).matchAll(IMG_RE)) {
       let p = m[0].replace(/[.,;:)\]]+$/, "").replace(/^[\s"'`]+|[\s"'`]+$/g, "");
       if (!p || found.includes(p)) continue;
@@ -203,7 +229,23 @@ function readContext(sessionId) {
   return data;
 }
 
+/**
+ * Image paths are harvested from tool input/result text, which means a regex over
+ * every event plus a statSync per hit. Doing that while rehydrating 38MB of logs
+ * dominated startup (3.5s); doing it for only the conversations actually opened
+ * costs nothing measurable.
+ */
+function ensureImages(conv) {
+  if (conv.imagesDone) return;
+  conv.imagesDone = true;
+  for (const blk of conv.baseBlocks) {
+    if (blk.kind !== "tool" || (blk.images && blk.images.length)) continue;
+    blk.images = collectImages(blk.input, blk.result);
+  }
+}
+
 function conversationView(conv) {
+  ensureImages(conv);
   let blocks = conv.baseBlocks.slice();
   if (conv.run) blocks = blocks.concat([conv.run.userBlock], conv.run.blocks);
   const firstUser = blocks.find((b) => b.kind === "user");
@@ -225,6 +267,8 @@ function conversationBrief(conv) {
   delete v.blocks;
   // context is kept: it is a handful of numbers and drives the per-row meter
   v.nBlocks = (conv.baseBlocks.length + (conv.run ? conv.run.blocks.length + 1 : 0));
+  v.calls = conv.baseBlocks.filter((b) => b.kind === "tool").length
+    + (conv.run ? conv.run.blocks.filter((b) => b.kind === "tool").length : 0);
   return v;
 }
 
@@ -720,8 +764,12 @@ async function callTool(name, args) {
       removed.reduce((a, r) => a + r.sessions, 0) + " DSH session dir(s).");
   }
   if (name === "dsh_conversations") {
-    return text(snapshot().conversations.map((v) =>
-      v.id + "  [" + v.status + "]  " + v.blocks.filter((b) => b.kind === "tool").length + " calls  " + v.title).join("\n") || "(none)");
+    // Metadata only: a full view here would force image harvesting for every
+    // conversation, which is exactly the startup cost this path must not pay.
+    return text([...conversations.values()].map((c) => {
+      const v = conversationBrief(c);
+      return v.id + "  [" + v.status + "]  " + v.calls + " calls  " + v.title;
+    }).join("\n") || "(none)");
   }
   if (name === "dsh_start") {
     const bad = needTask(args); if (bad) return bad;
@@ -862,12 +910,19 @@ function updateBlocks(s, ev) {
     if (last && last.kind === "think") last.text += "\n\n" + ev.text;
     else b.push({ kind: "think", id: "k" + s.blocks.length, text: ev.text });
   } else if (ev.type === "tool_call") {
-    b.push({ kind: "tool", id: ev.callId, callId: ev.callId, name: ev.tool, input: ev.input, status: "running",
-             t0: typeof ev.ts === "number" ? ev.ts : Date.now(), images: collectImages(ev.input) });
+    const blk = { kind: "tool", id: ev.callId, callId: ev.callId, name: ev.tool, input: ev.input, status: "running",
+             t0: typeof ev.ts === "number" ? ev.ts : Date.now(),
+             images: REPLAY_IMAGES ? collectImages(ev.input) : [] };
+    b.push(blk);
+    // Pairing a result with its call by scanning backwards is quadratic: 10k
+    // results over hundred-block conversations copied millions of elements while
+    // rehydrating. Keep an index instead.
+    (s.toolIdx || (s.toolIdx = new Map())).set(ev.callId, blk);
   } else if (ev.type === "tool_result") {
-    const t = [...b].reverse().find((x) => x.kind === "tool" && x.callId === ev.callId);
+    const t = (s.toolIdx || (s.toolIdx = new Map())).get(ev.callId);
     if (t) {
-      t.status = ev.status; t.result = ev.result; t.images = collectImages(ev.result);
+      t.status = ev.status; t.result = ev.result;
+      t.images = REPLAY_IMAGES ? collectImages(ev.result) : [];
       // the DSH event stream carries no timestamps, so timing is measured here,
       // at the moment each half of the call is folded
       t.t1 = typeof ev.ts === "number" ? ev.ts : Date.now();
@@ -1000,7 +1055,7 @@ function startHttpServer() {
       res.end(JSON.stringify({ ok: true, applied }));
     } else if (url === "/api/runs") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(snapshot().runs));
+      res.end(JSON.stringify([...runs.values()].map(summarizeRun)));
     } else if (url === "/api/stream") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       sseClients.add(res);
@@ -1237,6 +1292,9 @@ function rehydrate() {
       try { return { n, m: statSync(join(RUNS_DIR, n)).mtimeMs }; } catch { return null; }
     }).filter(Boolean).sort((a, b) => a.m - b.m);
 
+    // Replay deliberately builds blocks without image harvesting; conversationView
+    // fills them in per conversation the first time one is opened.
+    REPLAY_IMAGES = false;
     for (const { n, m } of dated.slice(-400)) {
       let raw = "";
       try { raw = readFileSync(join(RUNS_DIR, n), "utf8"); } catch { continue; }
@@ -1247,8 +1305,11 @@ function rehydrate() {
       cwdOfRun = sess.cwd ?? cwdOfRun;
       const conv = convFor(sess.sessionId, sess.cwd);
       const fresh = conv.baseBlocks.length === 0;
-      const blocks = [];
-      for (const e of evs) if (e.type !== "session" && e.type !== "bridge_meta") updateBlocks({ blocks }, e);
+      // One state object for the whole log, so updateBlocks can keep its call index
+      // across events. A fresh object per event defeated the index entirely.
+      const replay = { blocks: [] };
+      for (const e of evs) if (e.type !== "session" && e.type !== "bridge_meta") updateBlocks(replay, e);
+      const blocks = replay.blocks;
       if (fresh) conv.createdAt = meta?.startedAt ?? m;
       const lp = join(RUNS_DIR, n);
       if (!conv.logs.includes(lp)) conv.logs.push(lp);
@@ -1259,6 +1320,7 @@ function rehydrate() {
       const finished = blocks.some((b) => b.kind === "final");
       if (!conv.run) conv.status = finished ? "done" : "interrupted";
     }
+    REPLAY_IMAGES = true;
       if (conversations.size) log("rehydrated " + conversations.size + " conversation(s) from " + RUNS_DIR);
     const max = Number(process.env.DSH_MAX_CONVERSATIONS ?? 0);
     if (max > 0) { const n = pruneConversations(max); if (n) log("auto-pruned " + n + " old conversation(s), kept " + max); }
