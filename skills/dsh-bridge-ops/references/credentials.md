@@ -75,3 +75,46 @@ Expect `{"type":"final","text":"通了"}`. A credential error appears as a
 DSH prefers its credential store when the provider entry has **no** `apiKeyEnv`.
 Since the headless profile sets `apiKeyEnv`, the environment wins — which is why
 adding the variable to Codex's env block, or letting the bridge heal it, fixes it.
+
+## The key lives in two places, and they drift
+
+A provider key such as `OPENCODE_GO_API_KEY` can be stored **twice**:
+
+```
+~/.dsh/.credentials.yaml            <- what DSH desktop/web resolves
+User environment variable           <- what bridge healEnv() resolves
+```
+
+Updating one does not update the other, and the symptom is confusing: the
+desktop app works while every `dsh_run` fails, or the reverse. Observed
+2026-10-24: the credential store already held the rotated key while the user
+environment still held the previous one, so bridge-dispatched runs kept using a
+dead key.
+
+**Check both before concluding a key is bad:**
+
+```powershell
+# what DSH stores
+Select-String -Path "$HOME\.dsh\.credentials.yaml" -Pattern "OPENCODE_GO_API_KEY"
+# what the bridge will inject
+[Environment]::GetEnvironmentVariable("OPENCODE_GO_API_KEY","User")
+```
+
+You may ask DSH to keep no `apiKeyEnv` at all (letting its credential store win),
+but the bridge cannot see that store: `healEnv()` reads the environment only. So
+when a key is rotated, set **both**.
+
+After changing the user environment, already-running MCP servers still hold the
+old value in their own `process.env` -- `healEnv()` only fills variables that are
+**missing**, it never overwrites. A fresh Codex conversation (new MCP server) or
+a Codex restart is required for the rotation to take effect.
+
+Verification that does not depend on Codex:
+
+```powershell
+$env:OPENCODE_GO_API_KEY=[Environment]::GetEnvironmentVariable("OPENCODE_GO_API_KEY","User")
+dsh --profile headless --json "只回复两个字：通了"
+```
+
+Expect `{"type":"final","text":"通了"}`. A dead key shows up as `turn_end` with
+`reason.kind == "error"` and a provider message, never as an exception.
