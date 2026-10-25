@@ -333,16 +333,25 @@ function nearestReasoning(level) {
   }
   return best;
 }
-/** Write a one-line overlay selecting the requested effort. Cached per level. */
+const DEFAULT_MODEL = process.env.DSH_MODEL ?? "deepseek-v4.1-flash";
+// One route can serve several models, and they do not fail together. Measured
+// 2026-10-25: deepseek-v4.1-flash was intermittent (1/2), glm-5.3-flash healthy
+// (2/2), muse-spark unavailable (0/2) -- in the same minute, on the same key. So a
+// transient failure on one model is worth one attempt on another.
+const FALLBACK_MODEL = process.env.DSH_FALLBACK_MODEL ?? "glm-5.3-flash";
+/** Write an overlay selecting model and/or effort. Cached per combination. */
 const _patchCache = new Map();
-function reasoningPatch(level) {
-  if (!level) return null;
-  const lv = String(level).toLowerCase();
-  if (!REASONING_LEVELS.includes(lv)) return null;
-  if (_patchCache.has(lv)) return _patchCache.get(lv);
+function configPatch(model, level) {
+  const m = model || null;
+  const lv = level ? String(level).toLowerCase() : null;
+  if (!m && !lv) return null;
+  if (lv && !REASONING_LEVELS.includes(lv)) return null;
+  const key = (m || "") + "|" + (lv || "");
+  if (_patchCache.has(key)) return _patchCache.get(key);
   try {
     mkdirSync(BRIDGE_DIR, { recursive: true });
-    const p = join(BRIDGE_DIR, "reasoning-" + lv + ".yml");
+    const slug = (s) => String(s).replace(/[^a-z0-9.]+/gi, "-");
+    const p = join(BRIDGE_DIR, "cfg-" + slug(m || DEFAULT_MODEL) + (lv ? "-" + slug(lv) : "") + ".yml");
     // A patch REPLACES the entry's config rather than merging into it, so the
     // provider and model have to be restated or startup fails validation with
     // "$.provider missing required value".
@@ -351,13 +360,13 @@ function reasoningPatch(level) {
       '  name: "@deepseek-ai/dsh-agent-default-model"',
       "  config:",
       "    provider: opencode-go",
-      "    model: deepseek-v4.1-flash",
-      '    reasoningEffort: "' + lv + '"',
+      "    model: " + (m || DEFAULT_MODEL),
+      ...(lv ? ['    reasoningEffort: "' + lv + '"'] : []),
       "",
     ].join("\n"), "utf8");
-    _patchCache.set(lv, p);
+    _patchCache.set(key, p);
     return p;
-  } catch (e) { log("reasoning patch failed: " + e.message); return null; }
+  } catch (e) { log("config patch failed: " + e.message); return null; }
 }
 
 /**
@@ -422,7 +431,7 @@ function blockedRun({ task, cwd, why, userMessage }) {
   return state;
 }
 
-function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, contract }) {
+function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, contract, model }) {
   // A resume must land in the session's own directory, not the bridge's.
   const resumeCwd = session_id ? cwdForSession(session_id) : null;
   if (resumeCwd && !cwd) cwd = resumeCwd;
@@ -451,7 +460,7 @@ function startRun({ task, cwd, session_id, timeout_ms, userMessage, reasoning, c
   if (wantedLevel !== null && effectiveLevel !== wantedLevel) {
     log("run: reasoning " + wantedLevel + " not declared by this route; using " + effectiveLevel);
   }
-  const patchPath = reasoningPatch(effectiveLevel);
+  const patchPath = configPatch(model, effectiveLevel);
   if (patchPath) args.push("--patch", patchPath);
   args.push("--json");
   if (session_id) args.push("--session-id", String(session_id));
@@ -727,14 +736,85 @@ const needTask = (a) =>
   typeof a?.task === "string" && a.task.trim() !== "" ? null : text("task must be a non-empty string", true);
 const needRun = (a) => runs.get(a?.run_id) ?? null;
 
+/**
+ * A provider that rejects a request it accepted a moment earlier is an upstream
+ * fault, not a task fault. Measured over 12 days: 22 of 239 delegated runs (9.2%)
+ * died this way -- a bare "400 {model:...}" echo or "Upstream request failed" --
+ * and the identical task then succeeded on the next attempt. Retrying here is far
+ * cheaper than making the orchestrator notice and re-dispatch by hand.
+ *
+ * Only transport failures are retried. BLOCKED_*, credential, cwd and reasoning
+ * failures are decisions: retrying them spends the same wall clock twice and
+ * still fails.
+ */
+const TRANSIENT_RE = /INVALID_REQUEST|invalid_request_error|Upstream request failed|Streaming response failed|\b(500|502|503|504)\b|RATE_LIMIT|overloaded|temporarily unavailable/i;
+// A quota is a wall, not noise: waiting two seconds and reissuing the same request
+// just spends the wall clock twice. Surface it instead of retrying.
+const QUOTA_RE = /QUOTA|GoUsageLimitError|usage limit exceeded|INSUFFICIENT_BALANCE|insufficient/i;
+const TRANSIENT_RETRIES = Number(process.env.DSH_TRANSIENT_RETRIES ?? 2);
+const TRANSIENT_DELAYS = [2000, 6000];
+
+function isTransientFailure(state) {
+  if (!state || state.status === "done") return false;
+  if (state.killed || state.timedOut) return false;  // our own decisions, not upstream
+  const err = state.stderr || "";
+  if (QUOTA_RE.test(err)) return false;
+  return TRANSIENT_RE.test(err);
+}
+
+/**
+ * Run once, and retry while the failure looks like transport noise. On a retry we
+ * resume the session when one exists: the context already paid for is kept and
+ * only the rejected request is reissued.
+ */
+async function runWithRetry(baseArgs, sessionKey, label) {
+  let args = { ...baseArgs };
+  let best = null;
+  let tries = 0;
+  let retriesOnModel = 0;
+  let usedFallback = false;
+  for (;;) {
+    const done = await waitFor(startRun(args), Infinity);
+    tries++;
+    if (!best || (done.finalText ?? "").length > (best.finalText ?? "").length) best = done;
+    if (!isTransientFailure(done)) return { last: done, best, attempts: tries, usedFallback };
+    // keep the context we already paid for; only the rejected request is reissued
+    const sid = done.sessionId ?? args[sessionKey];
+    if (sid) args = { ...args, [sessionKey]: sid };
+    if (retriesOnModel < TRANSIENT_RETRIES) {
+      const delay = TRANSIENT_DELAYS[retriesOnModel] ?? 6000;
+      retriesOnModel++;
+      log("retry " + retriesOnModel + "/" + TRANSIENT_RETRIES + " after transient upstream failure"
+          + (label ? " (" + label + ")" : "") + " in " + delay + "ms");
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
+    // Same route, another model: the models fail independently, so this is the
+    // cheapest remaining chance before handing the failure to the orchestrator.
+    const primary = args.model || DEFAULT_MODEL;
+    if (!usedFallback && primary !== FALLBACK_MODEL) {
+      usedFallback = true;
+      retriesOnModel = 0;
+      args = { ...args, model: FALLBACK_MODEL };
+      log("retries exhausted on " + primary + "; one attempt on fallback " + FALLBACK_MODEL
+          + (label ? " (" + label + ")" : ""));
+      await new Promise((r) => setTimeout(r, 3000));
+      continue;
+    }
+    return { last: done, best, attempts: tries, usedFallback };
+  }
+}
+
 async function callTool(name, args) {
   if (name === "dsh_run") {
     const bad = needTask(args); if (bad) return bad;
     const busy = await guardSession(args.session_id, 120000);
     if (busy) return busy;
-    const s = startRun(args);
-    const done = await waitFor(s, Infinity);
+    const { last: done, best, attempts, usedFallback } = await runWithRetry(args, "session_id", "dsh_run");
     let body = done.finalText ?? "";
+    if (!body && best && best !== done && best.finalText) body = best.finalText;
+    if (usedFallback) body += (body ? "\n\n" : "") + "[dsh-mcp] primary model kept failing; this answer came from fallback " + FALLBACK_MODEL + ".";
+    if (attempts > 1 && done.status !== "done") body += (body ? "\n\n" : "") + "[dsh-mcp] retried " + (attempts - 1) + "x after transient upstream failures.";
     if (done.stderr.trim()) body += (body ? "\n\n" : "") + "[stderr]\n" + done.stderr.trim();
     if (done.timedOut) body += "\n\n[dsh-mcp] exceeded its time budget and was killed.";
     if (done.status === "running" && done.detached) {
@@ -747,12 +827,15 @@ async function callTool(name, args) {
     if (typeof args?.message !== "string" || !args.message.trim()) return text("message must be a non-empty string", true);
     const busy = await guardSession(args.conversation_id, 120000);
     if (busy) return busy;
-    const s = startRun({ task: args.message, userMessage: args.message,
-                         session_id: args.conversation_id, cwd: args.cwd, timeout_ms: args.timeout_ms,
-                         reasoning: args.reasoning, contract: args.contract });
-    const done2 = await waitFor(s, Infinity);
+    const { last: done2, best: best2, attempts, usedFallback } = await runWithRetry({
+      task: args.message, userMessage: args.message,
+      session_id: args.conversation_id, cwd: args.cwd, timeout_ms: args.timeout_ms,
+      reasoning: args.reasoning, contract: args.contract }, "session_id", "dsh_send");
     const id = done2.sessionId ?? args.conversation_id ?? "(unknown)";
     let body = done2.finalText ?? "";
+    if (!body && best2 && best2 !== done2 && best2.finalText) body = best2.finalText;
+    if (usedFallback) body += (body ? "\n\n" : "") + "[dsh-mcp] primary model kept failing; this answer came from fallback " + FALLBACK_MODEL + ".";
+    if (attempts > 1 && done2.status !== "done") body += (body ? "\n\n" : "") + "[dsh-mcp] retried " + (attempts - 1) + "x after transient upstream failures.";
     if (done2.stderr.trim()) body += (body ? "\n\n" : "") + "[stderr]\n" + done2.stderr.trim();
     const head = "[conversation " + id + "]";
     if (done2.status === "running" && done2.detached) {
