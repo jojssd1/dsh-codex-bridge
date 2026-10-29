@@ -41,3 +41,5 @@ node_modules/
 _*.mjs
 _*.ps1
 _*.log
+_raw-*.txt
+_*.log
