@@ -49,6 +49,15 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.DSH_MCP_TIMEOUT_MS ?? 1800000);
  */
 const CREDENTIAL_ENV = ["OPENCODE_GO_API_KEY", "DEEPSEEK_API_KEY", "ARK_API_KEY",
                         "HETU_API_KEY", "CATBEE_API_KEY"];
+// Some hosts -- Claude Code with MCP_ALLOWLIST_ENV, for one -- spawn a stdio server
+// with only a baseline environment. Then "reg" and "powershell" do not resolve and
+// healing silently fails, which surfaces much later as MISSING_CREDENTIAL in every
+// run. Resolve them absolutely; SystemRoot survives even a minimal environment.
+const SYSROOT = process.env.SystemRoot || process.env.windir || "C:\\Windows";
+const SYS32 = join(SYSROOT, "System32");
+const REG_EXE = existsSync(join(SYS32, "reg.exe")) ? join(SYS32, "reg.exe") : "reg";
+const PS_EXE = existsSync(join(SYS32, "WindowsPowerShell", "v1.0", "powershell.exe"))
+  ? join(SYS32, "WindowsPowerShell", "v1.0", "powershell.exe") : "powershell";
 function healEnv() {
   const missing = CREDENTIAL_ENV.filter((k) => !process.env[k]);
   if (!missing.length) return [];
@@ -59,7 +68,7 @@ function healEnv() {
     // environment, so the old loop burned ~400ms of every startup -- on top of
     // rehydration, which competes for exactly the same window.
     try {
-      const out = spawnSync("reg", ["query", "HKCU\\Environment"],
+      const out = spawnSync(REG_EXE, ["query", "HKCU\\Environment"],
         { encoding: "utf8", timeout: 8000, windowsHide: true }).stdout ?? "";
       const vals = new Map();
       for (const line of out.split(/\r?\n/)) {
@@ -76,7 +85,7 @@ function healEnv() {
     try {
       for (const k of missing) {
         try {
-          const v = spawnSync("powershell",
+          const v = spawnSync(PS_EXE,
             ["-NoProfile", "-NonInteractive", "-Command",
              "[Environment]::GetEnvironmentVariable('" + k + "','User')"],
             { encoding: "utf8", timeout: 8000, windowsHide: true }).stdout?.trim();

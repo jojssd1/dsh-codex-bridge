@@ -1,0 +1,8 @@
+=== STDOUT ===
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"logging":{}},"serverInfo":{"name":"dsh-bridge","version":"0.2.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"通了"}],"isError":false}}
+
+=== STDERR ===
+[dsh-mcp] rehydrated 339 conversation(s) from C:\Users\Admin01\.dsh-codex-bridge\runs
+[dsh-mcp] ready C:\Users\Admin01\AppData\Local\Programs\DeepSeek Harness\DeepSeek Harness.exe
+[dsh-mcp] hub: joined existing {"ok":true,"version":2,"role":"hub","pid":65012,"instances":13,"conversations":342}
